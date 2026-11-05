@@ -1,198 +1,377 @@
 // audio.js
-// Áudio 100% procedural com Web Audio, ligado ao AudioListener da câmara (three.js):
-// drone grave com reverb longo, cliques espacializados (HRTF) com limite de vozes,
-// zumbido elétrico por segmento que acende, hum coletivo, sweep da onda de luz e clímax.
+// Sonoplastia e ambiente musical do Swarm, segundo o doc "Arquitetura de síntese áudio em
+// tempo real para VR" (variante WebXR):
+//  - a música (pad com voice-leading, sub, arpejo, delay, ar, impactos e reverb FDN) é
+//    sintetizada num AudioWorklet (audio/synth-worklet.js), com relógio musical ao sample;
+//  - os efeitos do swarm (cliques, ignições, apagar) são amostras sintetizadas no arranque
+//    e tocadas por um conjunto FIXO de emissores HRTF reutilizados (voice stealing), em vez
+//    de criar um PannerNode por clique;
+//  - o néon e o murmúrio do swarm são fontes mono contínuas, ancoradas no espaço;
+//  - tudo passa por um compressor/limitador antes da saída, com um nível pensado para os
+//    altifalantes do Quest (sem sub-graves que eles não reproduzem).
+//
+// API pública (usada pelo director, main e debug): start, onSwarmEvent, sweep, climax,
+// restart, update, setVolume, volume.
 
-import { clamp, smooth } from './util/math.js';
+import { SCORE, chordAt, sectionAt, mtof } from './audio/score.js';
+import { clamp } from './util/math.js';
 
-const MAX_CLICK_VOICES = 16;
-const MAX_HUM_VOICES = 8;
+const WORKLET_URL = new URL('./audio/synth-worklet.js', import.meta.url);
+
+// zonas de néon: três emissores fixos ao longo do corredor (o utilizador está na origem, a olhar para -Z)
+const ZONES = [
+  { pos: [-6, 7, -14], z0: 0, z1: -40 },
+  { pos: [6.5, 10, -42], z0: -30, z1: -100 },
+  { pos: [0, 16, -95], z0: -80, z1: -220 },
+];
 
 export class SwarmAudio {
-  constructor(listener) {
+  constructor(listener, { quest = false } = {}) {
     this.listener = listener;
     this.ctx = listener.context;
+    this.quest = quest;
     this.ready = false;
-    this.clickVoices = 0;
-    this.humVoices = 0;
     this.volume = 0.8;
+    this.swarm = null;
+    this.lines = null;
+    this._tmp = { x: 0, y: 0, z: 0 };
+    this._rate = { click: 0, lit: 0, erase: 0, spawn: 0 };
+    this._last = { click: 0, lit: 0, erase: 0, spawn: 0 };
+    this._activity = 0;
+    this._t = 0;
+    this._frame = 0;
   }
 
   async start() {
     const ctx = this.ctx;
     if (ctx.state !== 'running') { try { await ctx.resume(); } catch (e) { /* ignorar */ } }
-    if (this.ready) return;
-    this.ready = true;
-    const out = this.listener.getInput();
+    if (this.ready || this._starting) return;
+    this._starting = true;
     this.listener.setMasterVolume(this.volume);
 
-    this.bus = ctx.createGain(); this.bus.gain.value = 1;
-    this.bus.connect(out);
-    // reverb longo: impulso gerado (ruído estéreo com decaimento exponencial) = espaço de catedral
-    this.reverb = ctx.createConvolver();
-    this.reverb.buffer = this._impulse(7.5, 2.6);
-    this.wet = ctx.createGain(); this.wet.gain.value = 0.55;
-    this.reverb.connect(this.wet).connect(this.bus);
-    this.send = ctx.createGain(); this.send.gain.value = 1; this.send.connect(this.reverb);
+    // ---------------- cadeia de saída: soma -> high-pass -> compressor (limitador) -> listener
+    this.master = ctx.createGain(); this.master.gain.value = this.quest ? 0.9 : 0.8;
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = this.quest ? 45 : 28; hp.Q.value = 0.7;
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.knee.value = 8; comp.ratio.value = 6; comp.attack.value = 0.004; comp.release.value = 0.25;
+    const lim = ctx.createDynamicsCompressor();
+    lim.threshold.value = -3; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.001; lim.release.value = 0.1;
+    this.master.connect(hp).connect(comp).connect(lim).connect(this.listener.getInput());
 
-    // drone: osciladores ligeiramente desafinados -> lowpass que abre com a timeline
-    this.droneFilter = ctx.createBiquadFilter();
-    this.droneFilter.type = 'lowpass'; this.droneFilter.frequency.value = 90; this.droneFilter.Q.value = 3.5;
-    this.droneGain = ctx.createGain(); this.droneGain.gain.value = 0;
-    this.droneFilter.connect(this.droneGain);
-    this.droneGain.connect(this.bus); this.droneGain.connect(this.send);
-    const freqs = [[55, 'sawtooth', 0.22], [55.35, 'sawtooth', 0.22], [82.4, 'sawtooth', 0.12], [110.2, 'triangle', 0.1], [27.5, 'sine', 0.5]];
-    for (const [f, type, g] of freqs) {
-      const o = ctx.createOscillator(); o.type = type; o.frequency.value = f;
-      const og = ctx.createGain(); og.gain.value = g;
-      o.connect(og).connect(this.droneFilter); o.start();
+    this.sfxBus = ctx.createGain(); this.sfxBus.gain.value = 1; this.sfxBus.connect(this.master);
+    this.revSend = ctx.createGain(); this.revSend.gain.value = 1;
+
+    // ---------------- amostras sintetizadas
+    this.buf = this._renderSamples();
+
+    // ---------------- conjunto de emissores HRTF para eventos
+    const NSLOTS = this.quest ? 8 : 14;
+    this.slots = [];
+    for (let i = 0; i < NSLOTS; i++) {
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 16000; lp.Q.value = 0.5;
+      const pan = this._panner(0, 0, -5, 3, 1.1);
+      lp.connect(pan).connect(this.sfxBus);
+      this.slots.push({ lp, pan, src: null, g: null, until: 0, start: 0 });
     }
-    // LFO lento no filtro, para o drone "respirar"
-    const lfo = ctx.createOscillator(); lfo.frequency.value = 0.07;
-    const lfoG = ctx.createGain(); lfoG.gain.value = 40;
-    lfo.connect(lfoG).connect(this.droneFilter.frequency); lfo.start();
+    this._slotNext = 0;
 
-    // hum coletivo da estrutura (50/100 Hz), proporcional à fração construída
-    this.humFilter = ctx.createBiquadFilter(); this.humFilter.type = 'lowpass'; this.humFilter.frequency.value = 320;
-    this.humGain = ctx.createGain(); this.humGain.gain.value = 0;
-    this.humFilter.connect(this.humGain); this.humGain.connect(this.bus); this.humGain.connect(this.send);
-    for (const [f, type, g] of [[50, 'sawtooth', 0.25], [100.3, 'sine', 0.35], [150.5, 'sine', 0.08]]) {
-      const o = ctx.createOscillator(); o.type = type; o.frequency.value = f;
-      const og = ctx.createGain(); og.gain.value = g;
-      o.connect(og).connect(this.humFilter); o.start();
+    // ---------------- worklet (música + fontes contínuas)
+    try {
+      await ctx.audioWorklet.addModule(WORKLET_URL.href);
+      this.synth = new AudioWorkletNode(ctx, 'swarm-synth', {
+        numberOfInputs: 1, numberOfOutputs: 5, outputChannelCount: [2, 1, 1, 1, 1],
+        processorOptions: { score: SCORE, quest: this.quest },
+      });
+      this.revSend.connect(this.synth);
+      this.bed = ctx.createGain(); this.bed.gain.value = 1;
+      this.synth.connect(this.bed, 0).connect(this.master);
+      // néon: três emissores fixos
+      this.zonePan = ZONES.map((z, k) => {
+        const p = this._panner(z.pos[0], z.pos[1], z.pos[2], 7, 0.9);
+        this.synth.connect(p, k + 1);
+        p.connect(this.sfxBus);
+        return p;
+      });
+      // murmúrio do swarm: segue o centro de massa
+      this.murPan = this._panner(0, 5.5, -16, 6, 0.8);
+      this.synth.connect(this.murPan, 4);
+      this.murPan.connect(this.sfxBus);
+      const murRev = ctx.createGain(); murRev.gain.value = 0.25;
+      this.synth.connect(murRev, 4); murRev.connect(this.revSend);
+    } catch (e) {
+      console.warn('[audio] AudioWorklet indisponível (precisa de HTTPS/localhost); só efeitos espacializados.', e);
+      this.revSend.disconnect();
     }
-
-    this.noiseBuf = this._noise(0.4);
+    this.ready = true;
+    this._starting = false;
   }
 
-  _impulse(seconds, decay) {
-    const ctx = this.ctx, n = Math.floor(ctx.sampleRate * seconds);
-    const buf = ctx.createBuffer(2, n, ctx.sampleRate);
-    let seed = 12345;
-    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296) * 2 - 1;
-    for (let c = 0; c < 2; c++) {
-      const d = buf.getChannelData(c);
-      for (let i = 0; i < n; i++) d[i] = rnd() * Math.pow(1 - i / n, decay) * (i < 400 ? i / 400 : 1);
-    }
-    return buf;
-  }
-  _noise(seconds) {
-    const ctx = this.ctx, n = Math.floor(ctx.sampleRate * seconds);
-    const buf = ctx.createBuffer(1, n, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    let seed = 777;
-    for (let i = 0; i < n; i++) d[i] = ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296) * 2 - 1;
-    return buf;
-  }
-  _panner(x, y, z, ref = 2) {
-    const p = new PannerNode(this.ctx, {
-      panningModel: 'HRTF', distanceModel: 'inverse', refDistance: ref, maxDistance: 400, rolloffFactor: 0.9,
+  _panner(x, y, z, ref, roll) {
+    return new PannerNode(this.ctx, {
+      panningModel: 'HRTF', distanceModel: 'inverse', refDistance: ref, maxDistance: 300, rolloffFactor: roll,
       positionX: x, positionY: y, positionZ: z,
     });
-    p.connect(this.bus);
-    return p;
   }
 
-  // clique curto e seco, espacializado; pitch varia um pouco
-  click(x, y, z, vol = 1) {
-    if (!this.ready || this.clickVoices >= MAX_CLICK_VOICES) return;
-    const ctx = this.ctx, t = ctx.currentTime;
-    this.clickVoices++;
-    const pan = this._panner(x, y, z, 1.5);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.5 * vol, t + 0.002);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.045);
-    g.connect(pan);
-    const sendG = ctx.createGain(); sendG.gain.value = 0.15; g.connect(sendG).connect(this.send);
-    const n = ctx.createBufferSource(); n.buffer = this.noiseBuf;
-    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 6;
-    bp.frequency.value = 2600 * (0.8 + Math.random() * 0.45);
-    n.connect(bp).connect(g);
-    const o = ctx.createOscillator(); o.type = 'square';
-    o.frequency.value = 1900 * (0.85 + Math.random() * 0.3);
-    const og = ctx.createGain(); og.gain.value = 0.12;
-    o.connect(og).connect(g);
-    n.start(t, Math.random() * 0.3, 0.05); o.start(t); o.stop(t + 0.03);
-    n.onended = () => { this.clickVoices--; pan.disconnect(); };
+  // ------------------------------------------------------------------ amostras (síntese offline)
+  _renderSamples() {
+    const sr = this.ctx.sampleRate;
+    let seed = 4242;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+    const make = (sec, fn) => {
+      const n = Math.floor(sr * sec), b = this.ctx.createBuffer(1, n, sr), d = b.getChannelData(0);
+      fn(d, n);
+      // normalizar o pico a 0.9
+      let pk = 0; for (let i = 0; i < n; i++) pk = Math.max(pk, Math.abs(d[i]));
+      if (pk > 0) for (let i = 0; i < n; i++) d[i] *= 0.9 / pk;
+      // fade-out final de 4 ms (sem cliques de corte)
+      const f = Math.min(n, Math.floor(sr * 0.004));
+      for (let i = 0; i < f; i++) d[n - 1 - i] *= i / f;
+      return b;
+    };
+    const TAU = Math.PI * 2;
+
+    // clique de rato: transiente de "press" e "release", corpo plástico ressonante
+    const clicks = [];
+    for (let v = 0; v < 4; v++) {
+      const f1 = 2600 + rnd() * 1400, f2 = 5200 + rnd() * 2400, f3 = 900 + rnd() * 500, rel = 0.055 + rnd() * 0.03;
+      clicks.push(make(0.14, (d, n) => {
+        let prev = 0;
+        for (let i = 0; i < n; i++) {
+          const t = i / sr;
+          let x = 0;
+          for (const [t0, a] of [[0, 1], [rel, 0.45]]) {
+            const u = t - t0; if (u < 0) continue;
+            const nz = rnd() * 2 - 1;
+            const hpN = nz - prev; prev = nz;
+            x += a * (hpN * Math.exp(-u / 0.0007) * 0.6
+              + Math.sin(TAU * f1 * u) * Math.exp(-u / 0.0022)
+              + Math.sin(TAU * f2 * u) * Math.exp(-u / 0.0011) * 0.5
+              + Math.sin(TAU * f3 * u) * Math.exp(-u / 0.004) * 0.35);
+          }
+          d[i] = x;
+        }
+      }));
+    }
+    // "tick" de vidro afinado (base C6): o swarm a tocar o acorde
+    const TICK_F = 1046.5;
+    const tick = make(1.4, (d, n) => {
+      for (let i = 0; i < n; i++) {
+        const t = i / sr, a = Math.min(1, t / 0.002);
+        d[i] = a * (Math.sin(TAU * TICK_F * t) * Math.exp(-t / 0.32)
+          + Math.sin(TAU * TICK_F * 2.756 * t) * Math.exp(-t / 0.07) * 0.35
+          + Math.sin(TAU * TICK_F * 5.404 * t) * Math.exp(-t / 0.025) * 0.15);
+      }
+    });
+    // ignição de néon (base C5): estalido + tom com o zumbido de 100 Hz da rede
+    const IGN_F = 523.25;
+    const ignite = make(2.4, (d, n) => {
+      let lp = 0;
+      for (let i = 0; i < n; i++) {
+        const t = i / sr;
+        let crackle = 0;
+        if (t < 0.09 && rnd() < 0.012) crackle = (rnd() * 2 - 1) * 2;
+        lp += (crackle - lp) * 0.3;
+        const a = Math.min(1, t / 0.018) * Math.exp(-t / 0.75);
+        const flutter = 1 + 0.28 * Math.sin(TAU * 100 * t);
+        d[i] = lp * 0.5 + a * flutter * (Math.sin(TAU * IGN_F * t) * 0.6
+          + Math.sin(TAU * IGN_F * 2 * t) * 0.22 * Math.exp(-t / 0.3)
+          + Math.sin(TAU * IGN_F * 3.01 * t) * 0.1 * Math.exp(-t / 0.15)
+          + Math.sin(TAU * IGN_F * 0.5 * t) * 0.25);
+      }
+    });
+    // apagar: glissando descendente curto ("unzip") com grão
+    const ERASE_F = 1200;
+    const erase = make(0.36, (d, n) => {
+      let ph = 0;
+      for (let i = 0; i < n; i++) {
+        const t = i / sr;
+        const f = ERASE_F * Math.pow(0.28, t / 0.3);
+        ph += f / sr;
+        const a = Math.min(1, t / 0.003) * Math.exp(-t / 0.09);
+        const grain = 0.7 + 0.3 * Math.sign(Math.sin(TAU * 38 * t));
+        d[i] = a * grain * (Math.sin(TAU * ph) * 0.7 + Math.sin(TAU * ph * 1.5) * 0.2) + (rnd() * 2 - 1) * a * 0.08;
+      }
+    });
+    return { clicks, tick, TICK_F, ignite, IGN_F, erase, ERASE_F };
   }
 
-  // zumbido elétrico quando um segmento acende
-  hum(x, y, z) {
-    if (!this.ready || this.humVoices >= MAX_HUM_VOICES) return;
+  // ------------------------------------------------------------------ eventos espacializados
+  _listenerPos() {
+    const e = this.listener.matrixWorld.elements;
+    return [e[12], e[13], e[14]];
+  }
+
+  // limitador de taxa: aceita no máximo `max` eventos/s por tipo; os longínquos são os
+  // primeiros a ser descartados. Devolve o ganho de compensação (muitos eventos => cada um mais baixo).
+  _admit(type, max, dist) {
+    const now = this.ctx.currentTime;
+    const r = this._rate;
+    const dt = Math.max(1e-3, now - this._last[type]);
+    r[type] = r[type] * Math.exp(-dt / 0.5) + 1; // eventos nos últimos ~0.5 s
+    this._last[type] = now;
+    const rate = r[type] / 0.5;
+    this._activity = Math.min(1, this._activity + 0.03);
+    const near = clamp(1.4 - dist / 30, 0.15, 1);
+    if (rate > max && Math.random() > (max / rate) * near * 1.4) return 0;
+    return 1 / Math.sqrt(Math.max(1, rate / (max * 0.35)));
+  }
+
+  _play(buf, x, y, z, { gain = 1, rate = 1, send = 0.2, dist = 0 } = {}) {
     const ctx = this.ctx, t = ctx.currentTime;
-    this.humVoices++;
-    const pan = this._panner(x, y, z, 3);
+    // escolhe o emissor livre, senão rouba o mais antigo
+    let slot = null;
+    for (let k = 0; k < this.slots.length; k++) {
+      const s = this.slots[(this._slotNext + k) % this.slots.length];
+      if (s.until <= t) { slot = s; break; }
+    }
+    if (!slot) {
+      slot = this.slots.reduce((a, b) => (a.start < b.start ? a : b));
+      if (slot.g) { slot.g.gain.cancelScheduledValues(t); slot.g.gain.setTargetAtTime(0, t, 0.004); }
+      if (slot.src) { try { slot.src.stop(t + 0.03); } catch (e) { /* já parou */ } }
+    }
+    this._slotNext = (this.slots.indexOf(slot) + 1) % this.slots.length;
+    // posição: salto imediato (o emissor estava calado ou acabou de ser silenciado)
+    slot.pan.positionX.setValueAtTime(x, t + 0.002);
+    slot.pan.positionY.setValueAtTime(y, t + 0.002);
+    slot.pan.positionZ.setValueAtTime(z, t + 0.002);
+    // absorção do ar: mais longe, mais escuro
+    slot.lp.frequency.setValueAtTime(clamp(17000 * Math.exp(-dist / 45), 1800, 17000), t);
+
+    const src = ctx.createBufferSource(); src.buffer = buf; src.playbackRate.value = rate;
     const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.16, t + 0.04);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 1.3);
-    g.connect(pan);
-    const sg = ctx.createGain(); sg.gain.value = 0.3; g.connect(sg).connect(this.send);
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 700; lp.Q.value = 2;
-    lp.connect(g);
-    const f = 100 * (0.97 + Math.random() * 0.06);
-    for (const [m, type, gg] of [[1, 'sawtooth', 0.5], [1.2, 'square', 0.15], [3, 'sine', 0.2]]) {
-      const o = ctx.createOscillator(); o.type = type; o.frequency.value = f * m;
-      const og = ctx.createGain(); og.gain.value = gg; o.connect(og).connect(lp);
-      o.start(t); o.stop(t + 1.4);
-      if (m === 1) o.onended = () => { this.humVoices--; pan.disconnect(); };
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(gain, t + 0.004);
+    src.connect(g).connect(slot.lp);
+    if (send > 0 && this.synth) { const sg = ctx.createGain(); sg.gain.value = send * gain; g.connect(sg).connect(this.revSend); src.onended = () => sg.disconnect(); }
+    src.start(t + 0.003);
+    slot.src = src; slot.g = g; slot.start = t; slot.until = t + 0.003 + buf.duration / rate;
+  }
+
+  _chordFreq(octaveUp, pick) {
+    const c = chordAt(this._t);
+    const m = c[1 + (pick % 4)] + 12 * octaveUp;
+    return mtof(m);
+  }
+
+  onSwarmEvent(type, x, y, z) {
+    if (!this.ready) return;
+    const lp = this._listenerPos();
+    const dist = Math.hypot(x - lp[0], y - lp[1], z - lp[2]);
+    const q = this.quest;
+    if (type === 'click') {
+      const g = this._admit('click', q ? 14 : 22, dist); if (!g) return;
+      const b = this.buf.clicks[(Math.random() * 4) | 0];
+      this._play(b, x, y, z, { gain: 0.42 * g, rate: 0.9 + Math.random() * 0.25, send: 0.12, dist });
+      // um em cada três cliques também "toca" uma nota do acorde (vidro, duas oitavas acima)
+      if (Math.random() < 0.33) {
+        const f = this._chordFreq(2, (Math.random() * 4) | 0);
+        this._play(this.buf.tick, x, y, z, { gain: 0.16 * g, rate: f / this.buf.TICK_F, send: 0.5, dist });
+      }
+    } else if (type === 'lit' || type === 'placed') {
+      const g = this._admit('lit', q ? 7 : 10, dist); if (!g) return;
+      const pick = (Math.random() * 4) | 0;
+      const f = this._chordFreq(type === 'placed' ? 0 : 1, pick);
+      this._play(this.buf.ignite, x, y, z, { gain: 0.26 * g, rate: f / this.buf.IGN_F, send: 0.45, dist });
+    } else if (type === 'erased') {
+      const g = this._admit('erase', q ? 10 : 16, dist); if (!g) return;
+      this._play(this.buf.erase, x, y, z, { gain: 0.24 * g, rate: 0.8 + Math.random() * 0.5, send: 0.3, dist });
+    } else if (type === 'spawn') {
+      // na escuridão, cada cursor que nasce é uma nota do acorde vazio
+      if (this._t > 25) return;
+      const g = this._admit('spawn', 6, dist); if (!g) return;
+      const f = this._chordFreq(2, (Math.random() * 4) | 0);
+      this._play(this.buf.tick, x, y, z, { gain: 0.12 * g, rate: f / this.buf.TICK_F, send: 0.6, dist });
     }
   }
 
-  // sweep tonal que viaja de perto para longe, a acompanhar a onda de luz
+  // compatibilidade com a API antiga
+  click(x, y, z) { this.onSwarmEvent('click', x, y, z); }
+  hum(x, y, z) { this.onSwarmEvent('lit', x, y, z); }
+
+  // onda de luz: acorde de Fá maj9 em senos que viaja do utilizador para o fundo do corredor
   sweep(duration) {
     if (!this.ready) return;
     const ctx = this.ctx, t = ctx.currentTime;
-    const pan = this._panner(0, 8, -6, 8);
+    const pan = this._panner(0, 8, -6, 10, 0.7);
+    pan.connect(this.sfxBus);
     pan.positionZ.setValueAtTime(-6, t);
     pan.positionZ.linearRampToValueAtTime(-216, t + duration);
     const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.5, t + 0.4);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + duration + 0.5);
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.22, t + 0.6);
+    g.gain.setTargetAtTime(0, t + duration - 0.5, 0.6);
     g.connect(pan);
-    const sg = ctx.createGain(); sg.gain.value = 0.6; g.connect(sg).connect(this.send);
-    for (const [f0, f1, type, gg] of [[220, 880, 'triangle', 0.4], [330, 1320, 'sine', 0.25], [110, 440, 'sawtooth', 0.08]]) {
-      const o = ctx.createOscillator(); o.type = type;
-      o.frequency.setValueAtTime(f0, t);
-      o.frequency.exponentialRampToValueAtTime(f1, t + duration);
-      const og = ctx.createGain(); og.gain.value = gg; o.connect(og).connect(g);
-      o.start(t); o.stop(t + duration + 0.6);
+    if (this.synth) { const sg = ctx.createGain(); sg.gain.value = 0.6; g.connect(sg).connect(this.revSend); }
+    const notes = SCORE.chords.Fma9;
+    notes.forEach((m, k) => {
+      const o = ctx.createOscillator(); o.type = k < 2 ? 'triangle' : 'sine';
+      o.frequency.value = mtof(m + 12);
+      o.detune.setValueAtTime(0, t); o.detune.linearRampToValueAtTime(k % 2 ? 7 : -7, t + duration);
+      const og = ctx.createGain(); og.gain.value = 0.16 / (1 + k * 0.3);
+      o.connect(og).connect(g); o.start(t + k * 0.06); o.stop(t + duration + 3);
+      if (k === 0) o.onended = () => pan.disconnect();
+    });
+  }
+
+  climax() {
+    if (!this.ready || !this.synth) return;
+    this.synth.port.postMessage({ type: 'impact', f: 62, gain: 1 });
+  }
+
+  restart() { this._activity = 0; }
+
+  // estado contínuo para o worklet e para as fontes ancoradas
+  update(t, { built = 0, pulse = 0, fade = 0 } = {}, playing = true) {
+    if (!this.ready) return;
+    const ctx = this.ctx, now = ctx.currentTime;
+    this._t = t;
+    this._frame++;
+    // atividade: decai sozinha (~1,5 s), sobe com os eventos; independente do framerate
+    const dt = Math.min(0.1, Math.max(0, now - (this._lastUpdate || now)));
+    this._lastUpdate = now;
+    this._activity *= Math.exp(-dt / 1.5);
+    // zonas de néon: fração construída em cada zona
+    let zones = [built, built, built];
+    if (this.lines && (this._frame % 15 === 0 || !this._zones)) this._zones = this._zoneFill();
+    if (this._zones) zones = this._zones;
+    if (this.synth) {
+      this.synth.port.postMessage({ type: 'state', t, at: now, playing, built, pulse, fade, activity: this._activity, zones });
     }
+    // murmúrio segue o centro do swarm
+    if (this.swarm && this.murPan && this._frame % 6 === 0) {
+      const c = this._swarmCenter();
+      if (c) {
+        this.murPan.positionX.setTargetAtTime(c[0], now, 0.25);
+        this.murPan.positionY.setTargetAtTime(c[1], now, 0.25);
+        this.murPan.positionZ.setTargetAtTime(c[2], now, 0.25);
+      }
+    }
+    if (this.bed) this.bed.gain.setTargetAtTime(1 - fade * 0.2, now, 0.3);
   }
 
-  climax() { /* o drone e o hum sobem em update(); aqui só um impacto grave */
-    if (!this.ready) return;
-    const ctx = this.ctx, t = ctx.currentTime;
-    const o = ctx.createOscillator(); o.type = 'sine';
-    o.frequency.setValueAtTime(70, t); o.frequency.exponentialRampToValueAtTime(30, t + 4);
-    const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.7, t + 0.05); g.gain.exponentialRampToValueAtTime(0.0001, t + 5);
-    o.connect(g); g.connect(this.bus); g.connect(this.send);
-    o.start(t); o.stop(t + 5.2);
+  _swarmCenter() {
+    const s = this.swarm, P = s.pos, A = s.alive;
+    let x = 0, y = 0, z = 0, c = 0;
+    for (let i = 0; i < s.n; i += 2) {
+      if (!A[i]) continue;
+      x += P[i * 3]; y += P[i * 3 + 1]; z += P[i * 3 + 2]; c++;
+    }
+    return c ? [x / c, y / c, z / c] : null;
   }
 
-  restart() {}
-
-  // drone e hum seguem a timeline
-  update(t, { built = 0, pulse = 0, fade = 0 } = {}) {
-    if (!this.ready) return;
-    const now = this.ctx.currentTime;
-    let cut;
-    if (t < 10) cut = 70 + t * 4;
-    else if (t < 25) cut = 110 + (t - 10) * 10;
-    else if (t < 55) cut = 260 + (t - 25) * 22;
-    else if (t < 65) cut = 920;
-    else if (t < 80) cut = 920 - (t - 65) * 20;
-    else if (t < 105) cut = 620 + (t - 80) * 36;
-    else cut = 1520 + smooth(105, 112, t) * 2600;
-    cut *= 1 + pulse * 0.3;
-    const dg = (0.06 + 0.18 * smooth(0, 8, t) + 0.12 * smooth(105, 112, t)) * (1 - fade);
-    this.droneFilter.frequency.setTargetAtTime(cut, now, 0.25);
-    this.droneGain.gain.setTargetAtTime(dg, now, 0.3);
-    this.humGain.gain.setTargetAtTime(clamp(built, 0, 1) * 0.12 * (1 + pulse) * (1 - fade), now, 0.4);
+  _zoneFill() {
+    const L = this.lines, st = L.state, A = L.A, B = L.B;
+    const sum = [0, 0, 0], cnt = [0, 0, 0];
+    for (let i = 0; i < L.count; i++) {
+      const zm = (A[i * 3 + 2] + B[i * 3 + 2]) / 2;
+      for (let k = 0; k < 3; k++) {
+        if (zm <= ZONES[k].z0 && zm > ZONES[k].z1) { sum[k] += st[i * 4 + 1] - st[i * 4]; cnt[k]++; }
+      }
+    }
+    return sum.map((s, k) => (cnt[k] ? clamp(s / Math.max(cnt[k], 20), 0, 1) : 0));
   }
 
   setVolume(v) { this.volume = v; this.listener.setMasterVolume(v); }
 }
+
+export { sectionAt };

@@ -66,7 +66,9 @@ structure/neonLines.js   todas as linhas num buffer; estado de construção por 
 swarm/steering.js     steering + curl noise; parâmetros de "organicidade" comentados
 swarm/agents.js       simulação dos cursores (arrays tipados) e render (InstancedMesh)
 swarm/cursorAtlas.js  seta, mão, ampulheta e cruz desenhadas em canvas
-audio.js              drone, reverb, cliques HRTF, zumbidos, sweep, clímax (Web Audio)
+audio.js              sonoplastia: emissores HRTF reutilizados, amostras sintetizadas, mistura e limitador
+audio/score.js        partitura (acordes por fase, arpejos), partilhada com o worklet
+audio/synth-worklet.js síntese em tempo real (AudioWorklet): pad, sub, arpejo, delay, reverb FDN, néon, murmúrio
 xr/session.js         VRButton, foveation, local-floor, deteção do Quest
 debug.js              painel lil-gui (só Desktop)
 ```
@@ -86,3 +88,24 @@ debug.js              painel lil-gui (só Desktop)
   uma animação curta (nada salta). Com 120 cursores (Quest) isto acontece a ~20 % da construção 2.
 - **Scrub**: recuar recomeça do zero e simula até ao instante pedido (passo fixo de 1/60 s,
   ~1 s de espera por cada 25 s de sequência).
+
+## Som
+
+Segue o doc "Arquitetura de síntese áudio em tempo real para VR" (variante WebXR):
+
+- **Música** (Ré menor, Ré maior no clímax), sintetizada num `AudioWorklet` com osciladores PolyBLEP,
+  filtros SVF e um reverb FDN partilhado. O relógio musical vem da timeline e os passos de arpejo
+  são agendados ao sample, por isso a música acompanha `?t=`, a pausa e o scrub.
+  Cada fase tem a sua harmonia: escuridão (quinta vazia), swarm (Rém9), construção 1
+  (Rém9, Sib, Solm9, Lá sus), estrutura completa (Fá maj9), desconstrução (Mib maj7#11, Mi m7b5),
+  construção 2 e clímax (Ré maior). Os acordes estão em `audio/score.js`.
+- **Efeitos do swarm**: cliques de rato, notas de vidro (afinadas pelo acorde atual), ignição do
+  néon e "apagar" são amostras sintetizadas no arranque e tocadas por 14 emissores HRTF fixos
+  (8 no Quest), com voice stealing, limite de eventos por segundo, compensação de ganho quando há
+  muitos eventos e absorção do ar com a distância.
+- **Fontes ancoradas**: três zonas de néon ao longo do corredor (sobem com o que está construído
+  em cada zona) e o murmúrio do swarm, que segue o centro do swarm. Em VR ficam fixas no espaço
+  quando se roda a cabeça.
+- **Níveis**: high-pass, compressor e limitador a -3 dBFS na saída. No Quest o sub é substituído
+  pela 2.ª harmónica, porque os altifalantes do headset não reproduzem graves abaixo de ~100 Hz.
+- O `AudioWorklet` precisa de contexto seguro (HTTPS ou localhost). Sem ele só se ouvem os efeitos.

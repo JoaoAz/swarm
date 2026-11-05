@@ -51,7 +51,8 @@ const swarm = new Swarm(Math.max(N, QUEST ? 200 : 600));
 swarm.setCount(N);
 swarm.addToScene(scene, { mirror: true });
 
-const audio = new SwarmAudio(listener);
+const audio = new SwarmAudio(listener, { quest: QUEST });
+audio.swarm = swarm; audio.lines = lines;
 const director = new Director({ lines, swarm, env, audio });
 
 // ------------------------------------------------------------------ pós-processamento (só Desktop)
