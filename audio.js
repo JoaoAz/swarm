@@ -18,12 +18,10 @@ import { clamp } from './util/math.js';
 
 const WORKLET_URL = new URL('./audio/synth-worklet.js', import.meta.url);
 
-// zonas de néon: três emissores fixos ao longo do corredor (o utilizador está na origem, a olhar para -Z)
-const ZONES = [
-  { pos: [-6, 7, -14], z0: 0, z1: -40 },
-  { pos: [6.5, 10, -42], z0: -30, z1: -100 },
-  { pos: [0, 16, -95], z0: -80, z1: -220 },
-];
+// néon: um emissor por braço do cruzamento (o utilizador está no centro). Ficam a ~7 m de
+// altura, à altura das molduras, e não por cima da cabeça.
+const ARMS = [[0, -1], [-1, 0], [0, 1], [1, 0]]; // braço 0 = -Z (à frente), depois -X, +Z, +X
+const ZONES = ARMS.map(([dx, dz]) => ({ pos: [dx * 24, 7, dz * 24], dir: [dx, dz] }));
 
 export class SwarmAudio {
   constructor(listener, { quest = false } = {}) {
@@ -79,25 +77,25 @@ export class SwarmAudio {
     try {
       await ctx.audioWorklet.addModule(WORKLET_URL.href);
       this.synth = new AudioWorkletNode(ctx, 'swarm-synth', {
-        numberOfInputs: 1, numberOfOutputs: 5, outputChannelCount: [2, 1, 1, 1, 1],
+        numberOfInputs: 1, numberOfOutputs: 6, outputChannelCount: [2, 1, 1, 1, 1, 1],
         processorOptions: { score: SCORE, quest: this.quest },
       });
       this.revSend.connect(this.synth);
       this.bed = ctx.createGain(); this.bed.gain.value = 1;
       this.synth.connect(this.bed, 0).connect(this.master);
-      // néon: três emissores fixos
+      // néon: um emissor fixo por braço
       this.zonePan = ZONES.map((z, k) => {
-        const p = this._panner(z.pos[0], z.pos[1], z.pos[2], 7, 0.9);
+        const p = this._panner(z.pos[0], z.pos[1], z.pos[2], 8, 1);
         this.synth.connect(p, k + 1);
         p.connect(this.sfxBus);
         return p;
       });
       // murmúrio do swarm: segue o centro de massa
-      this.murPan = this._panner(0, 5.5, -16, 6, 0.8);
-      this.synth.connect(this.murPan, 4);
+      this.murPan = this._panner(0, 4, -16, 6, 1);
+      this.synth.connect(this.murPan, 5);
       this.murPan.connect(this.sfxBus);
       const murRev = ctx.createGain(); murRev.gain.value = 0.25;
-      this.synth.connect(murRev, 4); murRev.connect(this.revSend);
+      this.synth.connect(murRev, 5); murRev.connect(this.revSend);
     } catch (e) {
       console.warn('[audio] AudioWorklet indisponível (precisa de HTTPS/localhost); só efeitos espacializados.', e);
       this.revSend.disconnect();
@@ -134,7 +132,7 @@ export class SwarmAudio {
     // clique de rato: transiente de "press" e "release", corpo plástico ressonante
     const clicks = [];
     for (let v = 0; v < 4; v++) {
-      const f1 = 2600 + rnd() * 1400, f2 = 5200 + rnd() * 2400, f3 = 900 + rnd() * 500, rel = 0.055 + rnd() * 0.03;
+      const f1 = 1900 + rnd() * 900, f2 = 3800 + rnd() * 1200, f3 = 900 + rnd() * 500, rel = 0.055 + rnd() * 0.03;
       clicks.push(make(0.14, (d, n) => {
         let prev = 0;
         for (let i = 0; i < n; i++) {
@@ -144,9 +142,9 @@ export class SwarmAudio {
             const u = t - t0; if (u < 0) continue;
             const nz = rnd() * 2 - 1;
             const hpN = nz - prev; prev = nz;
-            x += a * (hpN * Math.exp(-u / 0.0007) * 0.6
+            x += a * (hpN * Math.exp(-u / 0.0004) * 0.25
               + Math.sin(TAU * f1 * u) * Math.exp(-u / 0.0022)
-              + Math.sin(TAU * f2 * u) * Math.exp(-u / 0.0011) * 0.5
+              + Math.sin(TAU * f2 * u) * Math.exp(-u / 0.0008) * 0.2
               + Math.sin(TAU * f3 * u) * Math.exp(-u / 0.004) * 0.35);
           }
           d[i] = x;
@@ -170,11 +168,11 @@ export class SwarmAudio {
       for (let i = 0; i < n; i++) {
         const t = i / sr;
         let crackle = 0;
-        if (t < 0.09 && rnd() < 0.012) crackle = (rnd() * 2 - 1) * 2;
-        lp += (crackle - lp) * 0.3;
+        if (t < 0.05 && rnd() < 0.004) crackle = (rnd() * 2 - 1);
+        lp += (crackle - lp) * 0.12;
         const a = Math.min(1, t / 0.018) * Math.exp(-t / 0.75);
         const flutter = 1 + 0.28 * Math.sin(TAU * 100 * t);
-        d[i] = lp * 0.5 + a * flutter * (Math.sin(TAU * IGN_F * t) * 0.6
+        d[i] = lp * 0.25 + a * flutter * (Math.sin(TAU * IGN_F * t) * 0.6
           + Math.sin(TAU * IGN_F * 2 * t) * 0.22 * Math.exp(-t / 0.3)
           + Math.sin(TAU * IGN_F * 3.01 * t) * 0.1 * Math.exp(-t / 0.15)
           + Math.sin(TAU * IGN_F * 0.5 * t) * 0.25);
@@ -259,9 +257,9 @@ export class SwarmAudio {
     const dist = Math.hypot(x - lp[0], y - lp[1], z - lp[2]);
     const q = this.quest;
     if (type === 'click') {
-      const g = this._admit('click', q ? 14 : 22, dist); if (!g) return;
+      const g = this._admit('click', q ? 10 : 16, dist); if (!g) return;
       const b = this.buf.clicks[(Math.random() * 4) | 0];
-      this._play(b, x, y, z, { gain: 0.42 * g, rate: 0.9 + Math.random() * 0.25, send: 0.12, dist });
+      this._play(b, x, y, z, { gain: 0.3 * g, rate: 0.9 + Math.random() * 0.2, send: 0.12, dist });
       // um em cada três cliques também "toca" uma nota do acorde (vidro, duas oitavas acima)
       if (Math.random() < 0.33) {
         const f = this._chordFreq(2, (Math.random() * 4) | 0);
@@ -288,20 +286,22 @@ export class SwarmAudio {
   click(x, y, z) { this.onSwarmEvent('click', x, y, z); }
   hum(x, y, z) { this.onSwarmEvent('lit', x, y, z); }
 
-  // onda de luz: acorde de Fá maj9 em senos que viaja do utilizador para o fundo do corredor
+  // onda de luz radial: o acorde de Fá maj9 sai do centro e afasta-se pelos quatro braços
   sweep(duration) {
     if (!this.ready) return;
     const ctx = this.ctx, t = ctx.currentTime;
-    const pan = this._panner(0, 8, -6, 10, 0.7);
-    pan.connect(this.sfxBus);
-    pan.positionZ.setValueAtTime(-6, t);
-    pan.positionZ.linearRampToValueAtTime(-216, t + duration);
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(0.22, t + 0.6);
+    g.gain.linearRampToValueAtTime(0.11, t + 0.6);
     g.gain.setTargetAtTime(0, t + duration - 0.5, 0.6);
-    g.connect(pan);
-    if (this.synth) { const sg = ctx.createGain(); sg.gain.value = 0.6; g.connect(sg).connect(this.revSend); }
+    const pans = ARMS.map(([dx, dz]) => {
+      const p = this._panner(dx * 6, 6, dz * 6, 10, 0.7);
+      p.positionX.linearRampToValueAtTime(dx * 116, t + duration);
+      p.positionZ.linearRampToValueAtTime(dz * 116, t + duration);
+      g.connect(p).connect(this.sfxBus);
+      return p;
+    });
+    if (this.synth) { const sg = ctx.createGain(); sg.gain.value = 1.2; g.connect(sg).connect(this.revSend); }
     const notes = SCORE.chords.Fma9;
     notes.forEach((m, k) => {
       const o = ctx.createOscillator(); o.type = k < 2 ? 'triangle' : 'sine';
@@ -309,7 +309,7 @@ export class SwarmAudio {
       o.detune.setValueAtTime(0, t); o.detune.linearRampToValueAtTime(k % 2 ? 7 : -7, t + duration);
       const og = ctx.createGain(); og.gain.value = 0.16 / (1 + k * 0.3);
       o.connect(og).connect(g); o.start(t + k * 0.06); o.stop(t + duration + 3);
-      if (k === 0) o.onended = () => pan.disconnect();
+      if (k === 0) o.onended = () => pans.forEach((p) => p.disconnect());
     });
   }
 
@@ -331,7 +331,7 @@ export class SwarmAudio {
     this._lastUpdate = now;
     this._activity *= Math.exp(-dt / 1.5);
     // zonas de néon: fração construída em cada zona
-    let zones = [built, built, built];
+    let zones = [built, built, built, built];
     if (this.lines && (this._frame % 15 === 0 || !this._zones)) this._zones = this._zoneFill();
     if (this._zones) zones = this._zones;
     if (this.synth) {
@@ -342,7 +342,8 @@ export class SwarmAudio {
       const c = this._swarmCenter();
       if (c) {
         this.murPan.positionX.setTargetAtTime(c[0], now, 0.25);
-        this.murPan.positionY.setTargetAtTime(c[1], now, 0.25);
+        // a altura fica limitada: o swarm paira alto e o sopro não deve vir de cima da cabeça
+        this.murPan.positionY.setTargetAtTime(clamp(c[1], 1.5, 4), now, 0.25);
         this.murPan.positionZ.setTargetAtTime(c[2], now, 0.25);
       }
     }
@@ -361,12 +362,12 @@ export class SwarmAudio {
 
   _zoneFill() {
     const L = this.lines, st = L.state, A = L.A, B = L.B;
-    const sum = [0, 0, 0], cnt = [0, 0, 0];
+    const sum = [0, 0, 0, 0], cnt = [0, 0, 0, 0];
     for (let i = 0; i < L.count; i++) {
-      const zm = (A[i * 3 + 2] + B[i * 3 + 2]) / 2;
-      for (let k = 0; k < 3; k++) {
-        if (zm <= ZONES[k].z0 && zm > ZONES[k].z1) { sum[k] += st[i * 4 + 1] - st[i * 4]; cnt[k]++; }
-      }
+      const xm = (A[i * 3] + B[i * 3]) / 2, zm = (A[i * 3 + 2] + B[i * 3 + 2]) / 2;
+      // braço = eixo dominante do ponto médio
+      const k = Math.abs(zm) >= Math.abs(xm) ? (zm < 0 ? 0 : 2) : (xm < 0 ? 1 : 3);
+      sum[k] += st[i * 4 + 1] - st[i * 4]; cnt[k]++;
     }
     return sum.map((s, k) => (cnt[k] ? clamp(s / Math.max(cnt[k], 20), 0, 1) : 0));
   }
