@@ -7,8 +7,8 @@ import * as THREE from 'three';
 import { NeonLines } from '../structure/neonLines.js';
 import { wallPerspectiveLines } from '../structure/blueprints.js';
 
-export const FLOOR = { x0: -34, x1: 34, z0: 6, z1: -260 };
-const HEAT_W = 48, HEAT_H = 192;
+export const FLOOR = { x0: -115, x1: 115, z0: 115, z1: -115 }; // zona do cruzamento com mapa de calor
+const HEAT_W = 128, HEAT_H = 128;
 
 const floorVert = /* glsl */`
   varying vec3 vWorld;
@@ -24,6 +24,7 @@ const floorFrag = /* glsl */`
   uniform float uFogDensity;
   uniform vec3 uFogColor;
   uniform vec3 uColor;
+  uniform vec3 uAmbient;     // cor da iluminação ambiente (muda com a timeline)
   uniform float uGlow;        // iluminação geral do chão (sobe com a estrutura)
   uniform float uWaveZ;
   uniform float uWaveAmp;
@@ -60,9 +61,9 @@ const floorFrag = /* glsl */`
     float heat = texture2D(uHeat, clamp(uv, 0.0, 1.0)).r * inside;
     float dist = length(cameraPosition - vWorld);
     float c = circuit(vWorld.xz) * (1.0 - smoothstep(60.0, 160.0, dist)); // sem moiré ao longe
-    float wave = uWaveAmp * exp(-pow((vWorld.z - uWaveZ) / 9.0, 2.0));
+    float wave = uWaveAmp * exp(-pow((length(vWorld.xz) - uWaveZ) / 9.0, 2.0)); // onda radial a partir do centro
     // base quase preta e um pouco brilhante; o padrão quase invisível acende com o calor
-    vec3 base = vec3(0.006, 0.0012, 0.0016);
+    vec3 base = uAmbient * 0.0075;
     vec3 col = base + uColor * c * (0.01 + uGlow * 0.018 + heat * 0.4 + wave * 0.2);
     col += uColor * heat * 0.02;
     // névoa exp2 (igual às linhas) + um decaimento exponencial mais suave só no chão:
@@ -98,6 +99,7 @@ export class Environment {
       uFogDensity: { value: scene.fog.density },
       uFogColor: { value: new THREE.Color().setRGB(0.0035, 0.0006, 0.0008) }, // = cor da névoa no horizonte
       uColor: { value: new THREE.Color('#ff1a2a') },
+      uAmbient: { value: new THREE.Color('#ff2a3a') },
       uGlow: { value: 0 },
       uWaveZ: { value: 1000 },
       uWaveAmp: { value: 0 },

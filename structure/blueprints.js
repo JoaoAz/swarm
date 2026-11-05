@@ -8,17 +8,35 @@ import { mulberry32 } from '../util/math.js';
 
 const MAX_PIECE = 4.2;
 
-// Escala: valores escolhidos dentro das propostas do prompt (molduras 12–20 m, corredor 150–250 m).
+// Escala: molduras 16 m, arcos 24 m. O participante está no centro de um cruzamento:
+// quatro corredores (braços) saem do centro, um para cada lado, e perdem-se na névoa.
 export const SCALE = {
   squareSize: 16,      // molduras quadradas: 16 x 16 m
-  squareRings: 16,
-  squareSpacing: 12,   // 16 anéis * 12 m: o túnel vai até ~-192 m
+  squareRings: 9,      // anéis por braço
+  squareSpacing: 12,   // 9 anéis * 12 m: cada braço vai até ~106 m
+  squareFirst: 10,     // distância do centro ao primeiro anel
   archHeight: 24,      // arcos Λ: 24 m de altura, mais monumentais
   archHalfBase: 14,
-  archRings: 18,
-  archSpacing: 11,     // até ~-197 m
-  firstZ: -12,
+  archRings: 9,
+  archSpacing: 11,
+  archFirst: 15,       // > meia-base: os arcos de braços vizinhos não se cruzam
+  arms: 4,
 };
+
+// roda um ponto em torno do eixo vertical, 90° por braço (braço 0 = -Z, à frente)
+function rotArm([x, y, z], k) {
+  const a = (k * Math.PI) / 2, c = Math.round(Math.cos(a)), s = Math.round(Math.sin(a));
+  return [x * c + z * s, y, -x * s + z * c];
+}
+function inArms(build) {
+  const B = new Builder();
+  for (let k = 0; k < SCALE.arms; k++) {
+    const sub = new Builder();
+    build(sub);
+    for (const seg of sub.segments) B.segments.push({ ...seg, a: rotArm(seg.a, k), b: rotArm(seg.b, k) });
+  }
+  return B.segments;
+}
 
 class Builder {
   constructor() { this.segments = []; }
@@ -74,76 +92,50 @@ function baseMarkers(B, x, z, ring) {
   B.edge([x + s * 0.3, 0, z + 0.4], [x + s * 0.3, 0, z - 0.4], ring, { weight: 0.5, delay: 1 });
 }
 
+// Uma única moldura por anel (sem molduras concêntricas, que se liam como linhas duplicadas).
 export function squareTunnel() {
-  const B = new Builder();
-  const { squareSize: S, squareRings: R, squareSpacing: D, firstZ } = SCALE;
+  const { squareSize: S, squareRings: R, squareSpacing: D, squareFirst } = SCALE;
   const h = S / 2;
-  for (let r = 0; r < R; r++) {
-    const z = firstZ - r * D;
-    // moldura exterior: começa num canto do chão, sobe, atravessa o topo e desce
-    B.poly([[-h, 0, z], [-h, S, z], [h, S, z], [h, 0, z]], r, false);
-    // linha do chão da moldura (mais fina)
-    B.edge([-h, 0, z], [h, 0, z], r, { weight: 0.6, delay: 2 });
-    // moldura concêntrica interior
-    const i1 = 1.4;
-    B.poly([[-h + i1, 0, z], [-h + i1, S - i1, z], [h - i1, S - i1, z], [h - i1, 0, z]], r, false, { delay: 3, weight: 0.8 });
-    // terceira moldura, em anéis alternados (ritmo)
-    if (r % 2 === 0) {
-      const i2 = 3.2;
-      B.poly([[-h + i2, S - i2 - 4, z], [-h + i2, S - i2, z], [h - i2, S - i2, z], [h - i2, S - i2 - 4, z]], r, false, { delay: 6, weight: 0.55 });
+  const segments = inArms((B) => {
+    for (let r = 0; r < R; r++) {
+      const z = -squareFirst - r * D;
+      // moldura: começa num canto do chão, sobe, atravessa o topo e desce
+      B.poly([[-h, 0, z], [-h, S, z], [h, S, z], [h, 0, z]], r, false);
+      baseMarkers(B, -h, z, r);
+      baseMarkers(B, h, z, r);
+      // calhas longitudinais que ligam este anel ao seguinte (topo e chão)
+      if (r < R - 1) {
+        const z2 = z - D;
+        B.edge([-h, S, z], [-h, S, z2], r, { delay: 5, weight: 0.7 });
+        B.edge([h, S, z], [h, S, z2], r, { delay: 5, weight: 0.7 });
+        B.edge([-h, 0, z], [-h, 0, z2], r, { delay: 4, weight: 0.5 });
+        B.edge([h, 0, z], [h, 0, z2], r, { delay: 4, weight: 0.5 });
+      }
     }
-    baseMarkers(B, -h, z, r);
-    baseMarkers(B, h, z, r);
-    // calhas longitudinais que ligam este anel ao seguinte (topo e chão)
-    if (r < R - 1) {
-      const z2 = z - D;
-      B.edge([-h, S, z], [-h, S, z2], r, { delay: 5, weight: 0.7 });
-      B.edge([h, S, z], [h, S, z2], r, { delay: 5, weight: 0.7 });
-      B.edge([-h, 0, z], [-h, 0, z2], r, { delay: 4, weight: 0.5 });
-      B.edge([h, 0, z], [h, 0, z2], r, { delay: 4, weight: 0.5 });
-    }
-  }
-  // linhas do chão à escala humana, ao longo do eixo (guias de 1 m)
-  for (let k = 0; k < 2; k++) {
-    const x = k ? 1.1 : -1.1;
-    B.edge([x, 0, -4], [x, 0, firstZ], 0, { weight: 0.35, delay: 0 });
-  }
-  return { name: 'squareTunnel', segments: B.segments, rings: R };
+  });
+  return { name: 'squareTunnel', segments, rings: R };
 }
 
+// Um único arco Λ por anel (sem o Λ interior nem os chevrons junto ao vértice).
 export function chevronCorridor() {
-  const B = new Builder();
-  const { archHeight: H, archHalfBase: W, archRings: R, archSpacing: D, firstZ } = SCALE;
-  for (let r = 0; r < R; r++) {
-    const z = firstZ + 2 - r * D;
-    // arco triangular Λ: sobe pelas duas pernas em simultâneo (delay igual) até ao vértice
-    B.edge([-W, 0, z], [0, H, z], r, {});
-    B.edge([W, 0, z], [0, H, z], r, {});
-    // Λ interior
-    const k = 0.78;
-    B.edge([-W * k, 0, z], [0, H * k, z], r, { delay: 2, weight: 0.75 });
-    B.edge([W * k, 0, z], [0, H * k, z], r, { delay: 2, weight: 0.75 });
-    // chevrons junto ao vértice
-    for (let c = 0; c < 2; c++) {
-      const y = H * (0.86 - c * 0.08), w = W * (0.1 + c * 0.08);
-      const yt = y + w * (H / W);
-      B.poly([[-w, y, z], [0, yt, z], [w, y, z]], r, false, { delay: 5 + c, weight: 0.6 });
+  const { archHeight: H, archHalfBase: W, archRings: R, archSpacing: D, archFirst } = SCALE;
+  const segments = inArms((B) => {
+    for (let r = 0; r < R; r++) {
+      const z = -archFirst - r * D;
+      // sobe pelas duas pernas em simultâneo (delay igual) até ao vértice
+      B.edge([-W, 0, z], [0, H, z], r, {});
+      B.edge([W, 0, z], [0, H, z], r, {});
+      baseMarkers(B, -W, z, r);
+      baseMarkers(B, W, z, r);
+      if (r < R - 1) {
+        const z2 = z - D;
+        B.edge([0, H, z], [0, H, z2], r, { delay: 6, weight: 0.8 }); // cumeeira
+        B.edge([-W, 0, z], [-W, 0, z2], r, { delay: 4, weight: 0.5 });
+        B.edge([W, 0, z], [W, 0, z2], r, { delay: 4, weight: 0.5 });
+      }
     }
-    baseMarkers(B, -W, z, r);
-    baseMarkers(B, W, z, r);
-    if (r < R - 1) {
-      const z2 = z - D;
-      // cumeeira que liga os vértices
-      B.edge([0, H, z], [0, H, z2], r, { delay: 6, weight: 0.8 });
-      B.edge([-W, 0, z], [-W, 0, z2], r, { delay: 4, weight: 0.5 });
-      B.edge([W, 0, z], [W, 0, z2], r, { delay: 4, weight: 0.5 });
-    }
-  }
-  for (let k = 0; k < 2; k++) {
-    const x = k ? 1.1 : -1.1;
-    B.edge([x, 0, -4], [x, 0, firstZ + 2], 0, { weight: 0.35 });
-  }
-  return { name: 'chevronCorridor', segments: B.segments, rings: R };
+  });
+  return { name: 'chevronCorridor', segments, rings: R };
 }
 
 // Mistura: anéis alternados quadrados e triangulares (para o painel de debug).
@@ -157,22 +149,8 @@ export function mixed() {
 
 export const BLUEPRINTS = { squareTunnel, chevronCorridor, mixed };
 
-// Linhas de perspetiva nas paredes laterais, a convergir para o ponto de fuga do corredor.
-export function wallPerspectiveLines() {
-  const segs = [];
-  const vp = [0, 1.6, -320];
-  for (const sx of [-1, 1]) {
-    const x = sx * 26;
-    for (let i = 0; i < 9; i++) {
-      const y = i * 4.5;
-      const a = [x, y, 4];
-      const t = 0.62; // até onde a linha vai em direção ao ponto de fuga
-      const b = [x, y + (vp[1] - y) * t, a[2] + (vp[2] - a[2]) * t];
-      segs.push({ a, b, ring: 0, stagger: 0, weight: 0.22 });
-    }
-  }
-  return segs;
-}
+// Linhas de perspetiva nas paredes: retiradas no cruzamento (não há paredes laterais).
+export function wallPerspectiveLines() { return []; }
 
 export function shuffleWithSeed(arr, seed) {
   const r = mulberry32(seed);

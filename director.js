@@ -4,6 +4,7 @@
 // (pulso, onda de luz, fade) em função do tempo. Simulação em passo fixo com seed fixa:
 // a sequência é sempre igual.
 
+import * as THREE from 'three';
 import { TIMELINE } from './timeline.js';
 import { BLUEPRINTS } from './structure/blueprints.js';
 import { mulberry32, smooth, clamp } from './util/math.js';
@@ -274,8 +275,32 @@ export class Director {
   }
 
   // ------------------------------------------------------------------ visuais em função de t
+  // transição de cor: interpola as chaves de TIMELINE.palette e aplica às linhas, cursores,
+  // chão, névoa e horizonte
+  applyPalette(t) {
+    const P = this.cfg.palette;
+    if (!this._pal) {
+      this._pal = P.map((k) => ({ t: k.t, line: new THREE.Color(k.line), warm: new THREE.Color(k.warm), hot: new THREE.Color(k.hot), ambient: new THREE.Color(k.ambient) }));
+      this._c = { line: new THREE.Color(), warm: new THREE.Color(), hot: new THREE.Color(), ambient: new THREE.Color() };
+    }
+    const K = this._pal;
+    let i = 0;
+    while (i < K.length - 2 && t > K[i + 1].t) i++;
+    const A = K[i], B = K[i + 1];
+    const u = smooth(0, 1, (t - A.t) / Math.max(1e-3, B.t - A.t));
+    for (const key of ['line', 'warm', 'hot', 'ambient']) this._c[key].copy(A[key]).lerp(B[key], u);
+    const U = this.lines.uniforms, F = this.env.floorUniforms, c = this._c;
+    U.uColor.value.copy(c.line); U.uWarm.value.copy(c.warm); U.uHot.value.copy(c.hot);
+    this.swarm.uniforms.uRed.value.copy(c.line);
+    F.uColor.value.copy(c.line);
+    F.uAmbient.value.copy(c.ambient);
+    F.uFogColor.value.copy(c.ambient).multiplyScalar(0.0045);
+    if (this.env.scene.fog) this.env.scene.fog.color.copy(c.ambient).multiplyScalar(0.03);
+  }
+
   applyVisuals() {
     const t = this.t, cfg = this.cfg, U = this.lines.uniforms, cx = cfg.climax, c = cfg.complete;
+    this.applyPalette(t);
     const p1 = this.P('complete1');
     let pulse = 0, waveZ = 1000, waveAmp = 0;
     // estrutura completa: respiração suave + onda do primeiro ao último anel
@@ -284,7 +309,7 @@ export class Director {
     }
     if (t >= c.waveAt && t < c.waveAt + c.waveDuration + 1) {
       const k = (t - c.waveAt) / c.waveDuration;
-      waveZ = -6 - k * 210; waveAmp = 1.3 * (1 - smooth(0.85, 1.15, k));
+      waveZ = 6 + k * 110; waveAmp = 1.3 * (1 - smooth(0.85, 1.15, k));
     }
     // clímax: pulso cada vez mais rápido e ondas repetidas
     if (t >= cx.pulseFrom) {
@@ -292,7 +317,7 @@ export class Director {
       const f = 0.6 + 2.2 * k;
       pulse = 0.15 + 0.85 * k * (0.5 + 0.5 * Math.sin((t - cx.pulseFrom) * f * Math.PI * 2));
       const wt = (t - cx.pulseFrom) % 2.2;
-      waveZ = -6 - wt / 2.2 * 220; waveAmp = 1.2 * k;
+      waveZ = 6 + wt / 2.2 * 115; waveAmp = 1.2 * k;
     }
     U.uPulse.value = pulse;
     U.uWaveZ.value = waveZ;

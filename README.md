@@ -109,3 +109,11 @@ Segue o doc "Arquitetura de síntese áudio em tempo real para VR" (variante Web
 - **Níveis**: high-pass, compressor e limitador a -3 dBFS na saída. No Quest o sub é substituído
   pela 2.ª harmónica, porque os altifalantes do headset não reproduzem graves abaixo de ~100 Hz.
 - O `AudioWorklet` precisa de contexto seguro (HTTPS ou localhost). Sem ele só se ouvem os efeitos.
+
+## Cruzamento e cor
+
+O participante está no centro de um cruzamento: quatro corredores saem do centro, um para cada
+lado, e todos se constroem ao mesmo tempo, do centro para fora. A onda de luz também parte do
+centro. A cor das linhas, do chão e da névoa no horizonte muda ao longo da sequência
+(vermelho, laranja na onda de luz, magenta ao apagar, âmbar na construção 2, rosa no clímax).
+As chaves estão em `palette`, em `timeline.js`.

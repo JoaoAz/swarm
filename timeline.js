@@ -42,6 +42,20 @@ export const TIMELINE = {
 
   climax: { pulseFrom: 105, disperseAt: 108, disperseWindow: 4, fadeStart: 113, fadeEnd: 119.5 },
 
+  // Paleta ao longo do tempo (interpolada entre chaves). line: halo das linhas, warm: variação
+  // quente do halo, hot: núcleo, ambient: tom da névoa, do chão e do horizonte.
+  palette: [
+    { t: 0,   line: '#ff1a2a', warm: '#ff3b1a', hot: '#ff9aa6', ambient: '#ff1a2a' },
+    { t: 40,  line: '#ff1a2a', warm: '#ff3b1a', hot: '#ff9aa6', ambient: '#ff1a2a' },
+    { t: 56,  line: '#ff3a14', warm: '#ff6a10', hot: '#ffa888', ambient: '#ff3010' },
+    { t: 63,  line: '#ff6a10', warm: '#ffa020', hot: '#ffc080', ambient: '#ff5a10' },
+    { t: 72,  line: '#ff1450', warm: '#ff2a80', hot: '#ff9ccc', ambient: '#c0103a' },
+    { t: 82,  line: '#ff2a1a', warm: '#ff5a1a', hot: '#ffa48c', ambient: '#ff2010' },
+    { t: 100, line: '#ff7a14', warm: '#ffb02a', hot: '#ffc870', ambient: '#ff6a12' },
+    { t: 108, line: '#ff2a6a', warm: '#ff60a0', hot: '#ffc8e0', ambient: '#ff2060' },
+    { t: 120, line: '#ff1a2a', warm: '#ff3b1a', hot: '#ff9aa6', ambient: '#ff1a2a' },
+  ],
+
   // Câmara do modo cinemático (Desktop). pos e look interpolados com suavização.
   cinematic: [
     { t: 0,   pos: [0, 1.6, 2],    look: [0, 4, -40] },

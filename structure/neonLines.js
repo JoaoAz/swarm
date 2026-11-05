@@ -93,11 +93,11 @@ const frag = /* glsl */`
     // halo que chega a zero exatamente na borda do quad: sem arestas visíveis
     float win = (1.0 - d * d); win *= win;
     float glow = (exp(-d * d * 9.0) * 0.5 + exp(-d * 4.0) * 0.12) * win;
-    float wave = uWaveAmp * exp(-pow((vWorld.z - uWaveZ) / 7.0, 2.0));
+    float wave = uWaveAmp * exp(-pow((length(vWorld.xz) - uWaveZ) / 7.0, 2.0)); // onda radial: do centro do cruzamento para fora
     float flicker = 0.95 + 0.05 * sin(uTime * 23.0 + vWorld.z * 0.21 + vWorld.y * 0.13);
     float I = vInt * uGlobal * flicker * (1.0 + uPulse + wave * 2.5);
     vec3 halo = mix(uColor, uWarm, 0.25 + 0.25 * sin(vWorld.z * 0.045 + vWorld.x * 0.08));
-    vec3 col = halo * glow * I * 1.25 + uHot * core * I * (1.1 + wave);
+    vec3 col = halo * glow * I * 1.25 + uHot * core * I * (0.95 + wave);
     float fog = exp(-pow(uFogDensity * vDist, 2.0));
     col *= fog;
     if (uMirror > 0.5) col *= uOpacity * exp(-vMirrorDepth * 0.14);
