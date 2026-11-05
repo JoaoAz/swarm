@@ -259,9 +259,7 @@ export class Director {
 
   _onSwarmEvent(type, i, slot, x, y, z) {
     if (this.silent || !this.audio) return;
-    if (type === 'click') this.audio.click(x, y, z);
-    else if (type === 'lit' || type === 'placed') this.audio.hum(x, y, z);
-    else if (type === 'erased') this.audio.click(x, y, z, 0.6);
+    this.audio.onSwarmEvent(type, x, y, z);
   }
 
   get phase() {
@@ -308,7 +306,7 @@ export class Director {
     const fadeIn = 1 - smooth(0, 2.5, t);
     const fadeOut = smooth(cx.fadeStart, cx.fadeEnd, t);
     this.env.setFade(Math.max(fadeIn * 0.85, fadeOut));
-    if (this.audio && !this.silent) this.audio.update(t, { built: this._bf, pulse, fade: fadeOut });
+    if (this.audio && !this.silent) this.audio.update(t, { built: this._bf, pulse, fade: fadeOut }, this.playing);
   }
 }
 
