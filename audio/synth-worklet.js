@@ -7,8 +7,8 @@
 //
 // Entradas:  0 = envio de reverb dos efeitos espacializados (mono)
 // Saídas:    0 = cama musical estéreo (pad, sub, arpejo, delay, ar, impactos, reverb)
-//            1..3 = zumbido das três zonas de néon (mono, espacializadas fora daqui)
-//            4 = murmúrio do swarm (mono, segue o centro do swarm)
+//            1..4 = zumbido dos quatro braços de néon (mono, espacializadas fora daqui)
+//            5 = murmúrio do swarm (mono, segue o centro do swarm)
 //
 // Sem alocação no process(): tudo é pré-alocado no construtor.
 
@@ -85,8 +85,8 @@ class SwarmSynth extends AudioWorkletProcessor {
     this.sr = sr;
 
     // estado vindo do thread principal (suavizado aqui)
-    this.st = { t: 0, at: 0, playing: false, built: 0, pulse: 0, fade: 0, activity: 0, zones: [0, 0, 0] };
-    this.sm = { bright: 0.05, pad: 0, arp: 0, air: 0, sub: 0, built: 0, pulse: 0, fade: 0, act: 0, wet: 0.3, zones: [0, 0, 0] };
+    this.st = { t: 0, at: 0, playing: false, built: 0, pulse: 0, fade: 0, activity: 0, zones: [0, 0, 0, 0] };
+    this.sm = { bright: 0.05, pad: 0, arp: 0, air: 0, sub: 0, built: 0, pulse: 0, fade: 0, act: 0, wet: 0.3, zones: [0, 0, 0, 0] };
 
     // pad: 5 vozes x 2 serras
     this.padF = new Float32Array(5); this.padTarget = new Float32Array(5);
@@ -126,11 +126,12 @@ class SwarmSynth extends AudioWorkletProcessor {
     this.modPh = 0;
 
     // néon: 3 zonas
-    this.zone = [0, 1, 2].map((k) => ({ ph1: k * 0.3, ph2: k * 0.7, ph3: 0, flick: 1, flickT: 1, lp: new SVF(), n: new Noise(101 + k) }));
+    this.zone = [0, 1, 2, 3].map((k) => ({ ph1: k * 0.3, ph2: k * 0.7, ph3: 0, flick: 1, flickT: 1, lp: new SVF(), n: new Noise(101 + k) }));
     for (const z of this.zone) z.lp.set(380, 0.8, sr);
 
     // murmúrio
-    this.mur = { env: 0, bp: new SVF(), bp2: new SVF(), n: new Noise(77), drift: 0 };
+    // sopro suave e contínuo (sem grãos: os grãos curtos soavam a estática)
+    this.mur = { lp: new SVF(), lp2: new SVF(), n: new Noise(77), drift: 0, am: 0 };
 
     this.port.onmessage = (e) => this.onMsg(e.data);
   }
@@ -200,8 +201,8 @@ class SwarmSynth extends AudioWorkletProcessor {
   process(inputs, outputs) {
     const out = outputs[0];
     const L = out[0], R = out[1] || out[0];
-    const z1 = outputs[1] && outputs[1][0], z2 = outputs[2] && outputs[2][0], z3 = outputs[3] && outputs[3][0];
-    const mo = outputs[4] && outputs[4][0];
+    const zb = [1, 2, 3, 4].map((k) => outputs[k] && outputs[k][0]);
+    const mo = outputs[5] && outputs[5][0];
     const inp = inputs[0] && inputs[0][0];
     const N = L.length, sr = this.sr, s = this.st, sm = this.sm;
 
@@ -227,7 +228,7 @@ class SwarmSynth extends AudioWorkletProcessor {
     sm.arp += (arpT - sm.arp) * kb(0.8);
     sm.air += (sec.air * (1 - sm.fade) - sm.air) * kb(1.5);
     sm.sub += ((sec.id === 'dark' ? 0.7 : 1) * (1 - sm.fade) - sm.sub) * kb(1.2);
-    for (let k = 0; k < 3; k++) sm.zones[k] += ((s.zones[k] || 0) * (1 + 0.6 * s.pulse) * (1 - sm.fade) - sm.zones[k]) * kb(0.6);
+    for (let k = 0; k < 4; k++) sm.zones[k] += ((s.zones[k] || 0) * (1 + 0.6 * s.pulse) * (1 - sm.fade) - sm.zones[k]) * kb(0.6);
     this.setRT(climax ? 6.5 : sec.id === 'complete1' ? 5.5 : 4.2);
 
     // pad: alvos de frequência e máscara de vozes
@@ -239,7 +240,7 @@ class SwarmSynth extends AudioWorkletProcessor {
     this.lfo += TAU * 0.05 * N / sr; if (this.lfo > TAU) this.lfo -= TAU;
     const cut = 110 * Math.pow(2, sm.bright * 6.2) * (1 + 0.12 * Math.sin(this.lfo)) * (1 + 0.5 * sm.pulse);
     this.padL.set(cut, 0.85, sr); this.padR.set(cut * 1.04, 0.85, sr);
-    this.airL.set(3200 + 1800 * Math.sin(this.lfo * 0.7), 1.4, sr); this.airR.set(4100 + 1500 * Math.cos(this.lfo * 0.6), 1.4, sr);
+    this.airL.set(1400 + 500 * Math.sin(this.lfo * 0.7), 0.9, sr); this.airR.set(1700 + 500 * Math.cos(this.lfo * 0.6), 0.9, sr);
     for (const a of this.arp) if (a.on) a.f1.set(Math.min(9000, 380 + 3800 * a.fenv * (0.5 + sm.bright)), 1.1, sr);
     this.impLp.set(220, 0.7, sr);
 
@@ -248,15 +249,13 @@ class SwarmSynth extends AudioWorkletProcessor {
     // néon: frequências fixas no Ré (não chocam com nenhum acorde)
     const fz1 = mtof(74), fz2 = mtof(81), fBuzz = 100;
     // murmúrio
-    const murDensity = 30 + 900 * sm.act;
-    this.mur.drift += N / sr * 0.3;
-    this.mur.bp.set(1900 + 700 * Math.sin(this.mur.drift), 2.2, sr);
-    this.mur.bp2.set(4300 + 900 * Math.cos(this.mur.drift * 1.3), 3, sr);
-    const murGain = (0.08 + 0.55 * sm.act) * (1 - sm.fade);
-    const murDec = Math.exp(-1 / (0.006 * sr));
+    this.mur.drift += N / sr * 0.25;
+    this.mur.lp.set(520 + 260 * Math.sin(this.mur.drift), 0.6, sr);
+    this.mur.lp2.set(520 + 260 * Math.sin(this.mur.drift), 0.6, sr);
+    const murGain = (0.03 + 0.12 * sm.act) * (1 - sm.fade);
 
     const subMul = this.quest ? 0.45 : 1, sub2 = this.quest ? 0.9 : 0.25;
-    const padGain = 0.055, arpGain = 0.11, airGain = 0.02;
+    const padGain = 0.055, arpGain = 0.11, airGain = 0.006;
     const wet = 0.32 + 0.1 * climax;
 
     for (let i = 0; i < N; i++) {
@@ -358,10 +357,10 @@ class SwarmSynth extends AudioWorkletProcessor {
       if (R !== L) R[i] = oR / (1 + Math.abs(oR) * 0.6);
 
       // ---------- néon (3 zonas): seno em Ré5 + quinta + zumbido de 100 Hz com cintilação
-      if (z1) {
-        for (let k = 0; k < 3; k++) {
+      {
+        for (let k = 0; k < 4; k++) {
           const zz = this.zone[k], g = sm.zones[k];
-          const buf = k === 0 ? z1 : k === 1 ? z2 : z3;
+          const buf = zb[k];
           if (!buf) continue;
           if (g < 1e-4) { buf[i] = 0; continue; }
           zz.ph1 += fz1 * (1 + k * 0.0012) / sr; if (zz.ph1 >= 1) zz.ph1 -= 1;
@@ -377,10 +376,10 @@ class SwarmSynth extends AudioWorkletProcessor {
       // ---------- murmúrio do swarm: grãos curtos de ruído filtrado
       if (mo) {
         const m = this.mur;
-        if ((m.n.next() * 0.5 + 0.5) < murDensity / sr) m.env = 0.4 + 0.6 * (m.n.next() * 0.5 + 0.5);
-        m.env *= murDec;
-        const nz = m.n.next();
-        mo[i] = (m.bp.bp(nz) * 0.7 + m.bp2.bp(nz) * 0.4) * m.env * murGain * 0.35;
+        // ruído em dupla passa-baixo (~12 dB/oct x2) com respiração lenta: um sopro, não estática
+        m.am += TAU * 0.6 / sr; if (m.am > TAU) m.am -= TAU;
+        const breath = 0.7 + 0.3 * Math.sin(m.am);
+        mo[i] = m.lp2.lp(m.lp.lp(m.n.next())) * breath * murGain;
       }
     }
     return true;

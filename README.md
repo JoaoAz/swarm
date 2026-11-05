@@ -103,8 +103,9 @@ Segue o doc "Arquitetura de síntese áudio em tempo real para VR" (variante Web
   néon e "apagar" são amostras sintetizadas no arranque e tocadas por 14 emissores HRTF fixos
   (8 no Quest), com voice stealing, limite de eventos por segundo, compensação de ganho quando há
   muitos eventos e absorção do ar com a distância.
-- **Fontes ancoradas**: três zonas de néon ao longo do corredor (sobem com o que está construído
-  em cada zona) e o murmúrio do swarm, que segue o centro do swarm. Em VR ficam fixas no espaço
+- **Fontes ancoradas**: um emissor de néon por braço do cruzamento, a ~7 m de altura (sobe com o que
+  está construído nesse braço) e o murmúrio do swarm (um sopro grave e suave), que segue o centro do swarm com a altura limitada
+  a 4 m. Em VR ficam fixas no espaço
   quando se roda a cabeça.
 - **Níveis**: high-pass, compressor e limitador a -3 dBFS na saída. No Quest o sub é substituído
   pela 2.ª harmónica, porque os altifalantes do headset não reproduzem graves abaixo de ~100 Hz.
