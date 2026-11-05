@@ -1,7 +1,8 @@
 # Swarm (WebXR + three.js)
 
 Um swarm de cursores de rato constrói, desfaz e reconstrói um corredor monumental de néon vermelho.
-Sequência fixa de ~2 min, determinística (seed fixa), com áudio procedural. Funciona em Desktop
+Começa com um só cursor, controlado pelo participante, que desenha as primeiras linhas e acaba
+engolido pelo swarm. Sequência fixa de ~2 min 50 s, determinística (seed fixa), com áudio procedural. Funciona em Desktop
 (com bloom) e em VR no Meta Quest (glow feito com geometria), com o mesmo código.
 
 Sem bundler: `index.html` carrega `main.js` como ES module e o three.js 0.169 e o lil-gui vêm do
@@ -42,9 +43,22 @@ ngrok http 8000
 
 Abrir o URL `https://….ngrok-free.app` no Quest.
 
-## Controlos (Desktop)
+## Abertura (o cursor do participante)
 
-- Arrastar: olhar à volta. Duplo clique: pointer lock.
+Nos primeiros ~45 s o participante está sozinho no chão vazio com um cursor que controla:
+
+- **VR com hand tracking**: a ponta do indicador move o cursor; pinch (polegar + indicador) = clique.
+- **VR com comandos**: a ponta do comando move o cursor; gatilho = clique.
+- **Desktop**: o rato move o cursor; clique esquerdo = clique; arrastar com o botão direito para olhar.
+
+Cada clique toca uma nota e desenha no chão um dos quatro eixos do cruzamento. A partir dos 18 s
+surgem outros cursores que repetem a nota; entre os 34 s e os 44 s o cursor deixa de obedecer
+(atraso, desvios, cliques ignorados) e os outros imitam-no; aos 48 s junta-se ao swarm e começa a
+construção. Sem input durante 4 s entra um piloto automático (útil para gravar ou para quem não mexe).
+No clímax um cursor regressa por um instante à mão do participante (eco).
+
+
+- Arrastar: olhar à volta (na abertura, com o botão direito). Duplo clique: pointer lock.
 - Espaço: play/pausa. Setas ←/→: recuar/avançar 5 s.
 - C: câmara cinemática (para gravar vídeo). H: esconder o painel.
 - Painel de debug (lil-gui): play/pause, scrub da timeline, velocidade 0,25x–4x, N de cursores,
@@ -69,7 +83,8 @@ swarm/cursorAtlas.js  seta, mão, ampulheta e cruz desenhadas em canvas
 audio.js              sonoplastia: emissores HRTF reutilizados, amostras sintetizadas, mistura e limitador
 audio/score.js        partitura (acordes por fase, arpejos), partilhada com o worklet
 audio/synth-worklet.js síntese em tempo real (AudioWorklet): pad, sub, arpejo, delay, reverb FDN, néon, murmúrio
-xr/session.js         VRButton, foveation, local-floor, deteção do Quest
+xr/session.js         VRButton, foveation, local-floor, hand tracking, deteção do Quest
+xr/input.js           a "mão" do participante: indicador + pinch, comando ou rato
 debug.js              painel lil-gui (só Desktop)
 ```
 
@@ -118,3 +133,9 @@ lado, e todos se constroem ao mesmo tempo, do centro para fora. A onda de luz ta
 centro. A cor das linhas, do chão e da névoa no horizonte muda ao longo da sequência
 (vermelho, laranja na onda de luz, magenta ao apagar, âmbar na construção 2, rosa no clímax).
 As chaves estão em `palette`, em `timeline.js`.
+
+## Timeline e áudio
+
+A sequência passou de 120 s para 172 s. A partitura (`audio/score.js`) continua escrita para a
+timeline antiga: `legacyTime(t)`, em `timeline.js`, converte o tempo novo no antigo antes de o
+passar ao áudio, por isso a harmonia de cada fase continua alinhada.

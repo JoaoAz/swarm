@@ -11,7 +11,7 @@
 //    altifalantes do Quest (sem sub-graves que eles não reproduzem).
 //
 // API pública (usada pelo director, main e debug): start, onSwarmEvent, sweep, climax,
-// restart, update, setVolume, volume.
+// restart, update, setVolume, volume, note.
 
 import { SCORE, chordAt, sectionAt, mtof } from './audio/score.js';
 import { clamp } from './util/math.js';
@@ -280,6 +280,17 @@ export class SwarmAudio {
       const f = this._chordFreq(2, (Math.random() * 4) | 0);
       this._play(this.buf.tick, x, y, z, { gain: 0.12 * g, rate: f / this.buf.TICK_F, send: 0.6, dist });
     }
+  }
+
+  // nota do participante (pinch na abertura) e eco dos cursores que a repetem: o "vidro"
+  // afinado numa nota do acorde atual (pick 0..3), mais um pouco de ignição por baixo
+  note(x, y, z, pick = 0, gain = 1) {
+    if (!this.ready) return;
+    const lp = this._listenerPos();
+    const dist = Math.hypot(x - lp[0], y - lp[1], z - lp[2]);
+    const f = this._chordFreq(1, pick);
+    this._play(this.buf.tick, x, y, z, { gain: 0.32 * gain, rate: f / this.buf.TICK_F, send: 0.55, dist });
+    if (gain > 0.6) this._play(this.buf.ignite, x, y, z, { gain: 0.1 * gain, rate: (f / 2) / this.buf.IGN_F, send: 0.4, dist });
   }
 
   // compatibilidade com a API antiga

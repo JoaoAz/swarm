@@ -9,7 +9,9 @@ import { makeCursorAtlas, SHAPE, TIP, ARROW_FORWARD } from './cursorAtlas.js';
 import { TASK } from '../director.js';
 import { mulberry32, clamp } from '../util/math.js';
 
-export const ST = { HIDDEN: 0, IDLE: 1, REACT: 2, GOTO: 3, CLICK: 4, DRAW: 5, ERASE: 6, CARRY: 7, EXIT: 8 };
+export const ST = { HIDDEN: 0, IDLE: 1, REACT: 2, GOTO: 3, CLICK: 4, DRAW: 5, ERASE: 6, CARRY: 7, EXIT: 8, LEADER: 9, RETURN: 10 };
+export const LEADER = 0; // o cursor 0 é o do participante
+const LTRAIL = 240;       // histórico do líder: 4 s a 60 passos/s
 
 const CURSOR_SIZE = 0.2; // ~20 cm
 const TRAIL_LEN = 7;
@@ -183,13 +185,21 @@ export class Swarm {
   }
 
   // ---------------------------------------------------------------- reset determinístico
-  reset(seed, spawnCfg, cloud) {
+  reset(seed, spawnCfg, cloud, leaderCfg = null) {
     const r = mulberry32(seed);
     this.rng = mulberry32(seed + 99);
     this.curl = makeCurl(seed);
     this.cloud = cloud;
-    this.mode = 'cloud';
+    this.mode = leaderCfg ? 'leader' : 'cloud';
     const n = this.n;
+    // estado do cursor do participante (escrito pelo director a cada passo)
+    this.leader = { target: [0.12, 1.3, -0.55], control: 1, pinch: false, scale: leaderCfg ? leaderCfg.scale : 1, on: !!leaderCfg };
+    this.leaderTrail = new Float32Array(LTRAIL * 3);
+    for (let k = 0; k < LTRAIL; k++) this.leaderTrail.set(this.leader.target, k * 3);
+    this._lt = 0;
+    this.returnTarget = [0.12, 1.4, -0.7];
+    this.returnHold = 3; this._returned = false; this._leaderGrow = null;
+    this.imitate = { center: [0, 2.3, -4.8], radius: [3.4, 1.4, 2.2], gain: 3.2, rest: [0.12, 1.3, -0.55] };
     this.state.fill(ST.HIDDEN); this.alive.fill(0); this.task.fill(-1);
     this.vel.fill(0); this.scale.fill(0); this.tint.fill(0); this.pulse.fill(0); this.bank.fill(0);
     this.timer.fill(0); this.shape.fill(0); this.wander.fill(0); this.noise.fill(0); this.param.fill(0);
@@ -198,8 +208,14 @@ export class Swarm {
       let x, y, z, d;
       do { x = r.signed(); y = r.signed(); z = r.signed(); d = x * x + y * y + z * z; } while (d > 1);
       this.offset.set([x, y, z], i * 3);
-      // aparecem ao longe, espalhados no fundo do corredor
-      const sp = [r.range(-14, 14), r.range(3, 18), r.range(-45, -110)];
+      // com abertura: aparecem à volta do cursor do participante; sem ela, ao longe
+      let sp;
+      if (leaderCfg) {
+        const near = spawnCfg.near || [1.5, 6];
+        const a = r.range(-Math.PI * 0.85, Math.PI * 0.85), el = r.range(-0.2, 0.7), rr = r.range(near[0], near[1]);
+        sp = [Math.sin(a) * Math.cos(el) * rr, Math.max(0.4, 1.4 + Math.sin(el) * rr), -0.6 - Math.cos(a) * Math.cos(el) * rr];
+        if (i === LEADER) sp = this.leader.target.slice();
+      } else sp = [r.range(-14, 14), r.range(3, 18), r.range(-45, -110)];
       this.pos.set(sp, i * 3);
       this.anchor.set(sp, i * 3);
       this.head.set([r.signed() * 0.3, 1, 0], i * 3);
@@ -207,6 +223,7 @@ export class Swarm {
       this.distracted[i] = r() < 0.07 ? 1 : 0;
       const u = n > 1 ? i / (n - 1) : 0;
       this.spawnT[i] = spawnCfg.first + (spawnCfg.last - spawnCfg.first) * Math.pow(u, spawnCfg.curve) + r() * 0.3;
+      if (leaderCfg && i === LEADER) this.spawnT[i] = leaderCfg.appearAt;
       const a = r() * Math.PI * 2;
       this.exitDir.set([Math.cos(a) * r.range(0.2, 1), 1, Math.sin(a) * r.range(0.2, 1) - 0.3], i * 3);
       for (let k = 0; k < TRAIL_LEN; k++) this.trail.set(sp, (i * TRAIL_LEN + k) * 3);
@@ -230,10 +247,11 @@ export class Swarm {
       const i3 = i * 3;
       if (S[i] === ST.HIDDEN) {
         if (t >= this.spawnT[i]) {
-          S[i] = ST.IDLE; this.alive[i] = 1; this.pulse[i] = 1;
-          this.onEvent('spawn', i, -1, P[i3], P[i3 + 1], P[i3 + 2]);
+          S[i] = (i === LEADER && this.leader.on) ? ST.LEADER : ST.IDLE; this.alive[i] = 1; this.pulse[i] = 1;
+          this.onEvent(S[i] === ST.LEADER ? 'leader' : 'spawn', i, -1, P[i3], P[i3 + 1], P[i3 + 2]);
         } else continue;
       }
+      if (S[i] === ST.LEADER) { this._stepLeader(i, dt, t); continue; }
       let px = P[i3], py = P[i3 + 1], pz = P[i3 + 2];
       const vx = V[i3], vy = V[i3 + 1], vz = V[i3 + 2];
       acc[0] = acc[1] = acc[2] = 0;
@@ -247,7 +265,14 @@ export class Swarm {
         flock = true;
         // alvo de repouso: nuvem (antes de construir) ou âncora junto ao último trabalho
         let tx, ty, tz;
-        if (this.mode === 'cloud') {
+        if (this.mode === 'leader') {
+          // imitam o cursor do participante: cada um copia o movimento dele com um atraso
+          // próprio, ampliado numa nuvem à frente (como um eco)
+          const L = this._leaderAt(0.25 + (i % 23) * 0.07), im = this.imitate;
+          tx = im.center[0] + this.offset[i3] * im.radius[0] + (L[0] - im.rest[0]) * im.gain;
+          ty = Math.max(0.4, im.center[1] + this.offset[i3 + 1] * im.radius[1] + (L[1] - im.rest[1]) * im.gain);
+          tz = im.center[2] + this.offset[i3 + 2] * im.radius[2] + (L[2] - im.rest[2]) * im.gain * 0.6;
+        } else if (this.mode === 'cloud') {
           tx = c.center[0] + this.offset[i3] * c.radius[0] * breathe;
           ty = c.center[1] + this.offset[i3 + 1] * c.radius[1] * breathe;
           tz = c.center[2] + this.offset[i3 + 2] * c.radius[2] * breathe;
@@ -362,6 +387,13 @@ export class Swarm {
           this.onEvent('placed', i, tk.slot, mx, my, mz);
           this._finish(i, board, px, py, pz);
         }
+      } else if (st === ST.RETURN) {
+        // eco no clímax: volta ao participante, paira junto à mão e depois sobe
+        vmax = 9; amax = STEER.maxAccel; noiseAmp = 0.3;
+        const g = this.returnTarget;
+        const d = arrive(px, py, pz, vx, vy, vz, g[0], g[1], g[2], vmax, 0.35, 3, acc);
+        if (d < 0.25 && !this._returned) { this._returned = true; this.pulse[i] = 1; this.onEvent('returned', i, -1, px, py, pz); }
+        if (this.timer[i] > this.returnHold) { this._returned = false; S[i] = ST.EXIT; this.timer[i] = 0; }
       } else if (st === ST.EXIT) {
         vmax = 13; amax = 9; noiseAmp = STEER.noiseIdle * 1.5;
         const e3 = this.exitDir;
@@ -439,12 +471,64 @@ export class Swarm {
       }
 
       // estado visual
-      const working = st >= ST.CLICK && st <= ST.CARRY;
+      const working = (st >= ST.CLICK && st <= ST.CARRY) || st === ST.RETURN;
       this.tint[i] += ((working ? 1 : 0) - this.tint[i]) * Math.min(1, dt * (working ? 10 : 2));
       this.pulse[i] = Math.max(0, this.pulse[i] - dt * 4);
       const grow = Math.min(1, (t - this.spawnT[i]) / 0.8);
-      this.scale[i] = grow * (1 + this.pulse[i] * 0.7);
+      let sc = 1;
+      if (st === ST.RETURN) {
+        // encolhe à escala da mão quando está perto do participante
+        const g = this.returnTarget;
+        sc = clamp(Math.hypot(px - g[0], py - g[1], pz - g[2]) / 3, this.leader.scale, 1);
+      }
+      if (i === LEADER && this.leader.on && this._leaderGrow != null) sc = this._leaderGrow;
+      this.scale[i] = grow * sc * (1 + this.pulse[i] * 0.7);
     }
+    // histórico do líder (para os outros o imitarem com atraso)
+    this._lt = (this._lt + 1) % LTRAIL;
+    this.leaderTrail[this._lt * 3] = P[LEADER * 3];
+    this.leaderTrail[this._lt * 3 + 1] = P[LEADER * 3 + 1];
+    this.leaderTrail[this._lt * 3 + 2] = P[LEADER * 3 + 2];
+  }
+
+  _leaderAt(delay) {
+    const k = ((this._lt - Math.round(delay * 60)) % LTRAIL + LTRAIL) % LTRAIL;
+    const T = this.leaderTrail; const o = this._lo || (this._lo = [0, 0, 0]);
+    o[0] = T[k * 3]; o[1] = T[k * 3 + 1]; o[2] = T[k * 3 + 2];
+    return o;
+  }
+
+  // O cursor do participante: segue a mão com um atraso que cresce à medida que se perde
+  // o controlo (control 1 -> 0) e "desobedece" (desvio de curl noise proporcional à perda).
+  _stepLeader(i, dt, t) {
+    const i3 = i * 3, P = this.pos, V = this.vel, L = this.leader;
+    const c = clamp(L.control, 0, 1);
+    const k = 1 - Math.exp(-dt * (2 + 40 * c * c));
+    const n = this.noise;
+    if ((Math.round(t * 60) % 3) === 0) this.curl(P[i3] * 8, P[i3 + 1] * 8, P[i3 + 2] * 8, t * 0.6, n.subarray(i3, i3 + 3));
+    const dis = (1 - c) * 0.35;
+    const tx = L.target[0] + n[i3] * dis, ty = L.target[1] + n[i3 + 1] * dis * 0.6, tz = L.target[2] + n[i3 + 2] * dis;
+    const nx = P[i3] + (tx - P[i3]) * k, ny = P[i3 + 1] + (ty - P[i3 + 1]) * k, nz = P[i3 + 2] + (tz - P[i3 + 2]) * k;
+    V[i3] = (nx - P[i3]) / dt; V[i3 + 1] = (ny - P[i3 + 1]) / dt; V[i3 + 2] = (nz - P[i3 + 2]) / dt;
+    P[i3] = nx; P[i3 + 1] = ny; P[i3 + 2] = nz;
+    // seta na orientação clássica (ponta para cima-esquerda) enquanto obedece; depois
+    // roda para a direção do movimento
+    const H = this.head, sp = Math.hypot(V[i3], V[i3 + 1], V[i3 + 2]);
+    const hx = sp > 0.3 && c < 0.6 ? V[i3] / sp : -0.37, hy = sp > 0.3 && c < 0.6 ? V[i3 + 1] / sp : 0.93, hz = sp > 0.3 && c < 0.6 ? V[i3 + 2] / sp : 0;
+    const a = Math.min(1, dt * 8);
+    H[i3] += (hx - H[i3]) * a; H[i3 + 1] += (hy - H[i3 + 1]) * a; H[i3 + 2] += (hz - H[i3 + 2]) * a;
+    this.bank[i] *= 0.9;
+    this.tint[i] += ((L.pinch ? 1 : 0.15) - this.tint[i]) * Math.min(1, dt * 14);
+    this.pulse[i] = Math.max(0, this.pulse[i] - dt * 4);
+    this.shape[i] = c < 0.35 && Math.sin(t * 9) > 0.6 ? SHAPE.WAIT : SHAPE.ARROW; // pisca a ampulheta ao perder-se
+    const grow = Math.min(1, (t - this.spawnT[i]) / 0.8);
+    this.scale[i] = grow * L.scale * (1 + this.pulse[i] * 0.7);
+  }
+
+  // o líder passa a ser um cursor como os outros
+  releaseLeader() {
+    if (this.state[LEADER] === ST.LEADER) { this.state[LEADER] = ST.IDLE; this.timer[LEADER] = 0; }
+    this._leaderGrow = null;
   }
 
   _finish(i, board, px, py, pz) {
@@ -477,7 +561,7 @@ export class Swarm {
   }
 
   exit(i) {
-    if (this.state[i] === ST.HIDDEN) return;
+    if (this.state[i] === ST.HIDDEN || this.state[i] === ST.RETURN || this.state[i] === ST.LEADER) return;
     this.state[i] = ST.EXIT; this.timer[i] = 0;
   }
 

@@ -14,6 +14,7 @@ import { Swarm } from './swarm/agents.js';
 import { Director } from './director.js';
 import { SwarmAudio } from './audio.js';
 import { setupXR, isQuestBrowser } from './xr/session.js';
+import { ParticipantInput } from './xr/input.js';
 import { smooth } from './util/math.js';
 
 const params = new URLSearchParams(location.search);
@@ -55,6 +56,11 @@ const audio = new SwarmAudio(listener, { quest: QUEST });
 audio.swarm = swarm; audio.lines = lines;
 const director = new Director({ lines, swarm, env, audio });
 
+// a "mão" do participante (hand tracking, comando ou rato): na abertura controla um cursor
+const input = new ParticipantInput(renderer, camera, rig, renderer.domElement);
+director.input = input;
+input.onPinchStart = (p) => director.pinch(p, true);
+
 // ------------------------------------------------------------------ pós-processamento (só Desktop)
 // render target com MSAA (4 amostras): sem isto as linhas finas ficam serrilhadas e o bloom
 // transforma o serrilhado em "contas" ao longo das linhas
@@ -95,7 +101,11 @@ setupXR(renderer, {
 // ------------------------------------------------------------------ olhar à volta (Desktop)
 const look = { yaw: 0, pitch: 0.08, dragging: false, lx: 0, ly: 0 };
 const cv = renderer.domElement;
-cv.addEventListener('pointerdown', (e) => { look.dragging = true; look.lx = e.clientX; look.ly = e.clientY; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('contextmenu', (e) => e.preventDefault());
+cv.addEventListener('pointerdown', (e) => {
+  // enquanto controlas o cursor, o botão esquerdo é o "pinch"; olha-se com o botão direito
+  if (input.mouseEnabled && e.button === 0) return;
+  look.dragging = true; look.lx = e.clientX; look.ly = e.clientY; cv.setPointerCapture(e.pointerId); });
 cv.addEventListener('pointerup', (e) => { look.dragging = false; cv.releasePointerCapture(e.pointerId); });
 cv.addEventListener('pointermove', (e) => {
   const locked = document.pointerLockElement === cv;
@@ -104,7 +114,7 @@ cv.addEventListener('pointermove', (e) => {
   look.lx = e.clientX; look.ly = e.clientY;
   look.yaw -= dx * 0.0035; look.pitch = Math.max(-1.3, Math.min(1.45, look.pitch - dy * 0.0035));
 });
-cv.addEventListener('dblclick', () => cv.requestPointerLock && cv.requestPointerLock());
+cv.addEventListener('dblclick', () => { if (!input.mouseEnabled && cv.requestPointerLock) cv.requestPointerLock(); });
 
 // modo cinemático: keyframes de timeline.js com interpolação suave
 const _p = new THREE.Vector3(), _l = new THREE.Vector3(), _a = new THREE.Vector3(), _b = new THREE.Vector3();
@@ -143,6 +153,9 @@ const clock = new THREE.Clock();
 const stats = { frames: 0, acc: 0, fps: 0 };
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
+  const Lc = TIMELINE.leader;
+  input.mouseEnabled = app.started && !renderer.xr.isPresenting && director.t >= Lc.appearAt && director.t < Lc.lossEnd;
+  input.update();
   director.advance(dt);
   director.applyVisuals();
   lines.update(dt, director.t);

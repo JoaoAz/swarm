@@ -60,7 +60,7 @@ export function setupDebug({ director, swarm, bloom, audio, app }) {
       if (!st._scrubbing) st.time = director.t;
       st.playing = director.playing;
       st.phase = director.phase.label;
-      st.plan = director.t < 65 ? director.blueprint1 : director.blueprint2;
+      st.plan = director.t < director.P('morph').end ? director.blueprint1 : director.blueprint2;
     },
   };
 }

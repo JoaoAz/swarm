@@ -15,7 +15,7 @@ export function setupXR(renderer, { onStart, onEnd } = {}) {
   renderer.xr.setFoveation(1.0);          // foveation máxima: poupa muito fill-rate no Quest
   if (renderer.xr.setFramebufferScaleFactor) renderer.xr.setFramebufferScaleFactor(1.0);
 
-  const button = VRButton.createButton(renderer, { optionalFeatures: ['local-floor'] });
+  const button = VRButton.createButton(renderer, { optionalFeatures: ['local-floor', 'hand-tracking'] });
   button.id = 'vr-button';
   document.body.appendChild(button);
 

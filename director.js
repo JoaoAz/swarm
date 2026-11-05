@@ -5,13 +5,16 @@
 // a sequência é sempre igual.
 
 import * as THREE from 'three';
-import { TIMELINE } from './timeline.js';
+import { TIMELINE, legacyTime } from './timeline.js';
 import { BLUEPRINTS } from './structure/blueprints.js';
 import { mulberry32, smooth, clamp } from './util/math.js';
 
 export const TASK = { DRAW: 0, ERASE: 1, CARRY: 2 };
 const T_PENDING = 0, T_OPEN = 1, T_CLAIMED = 2, T_DONE = 3;
 export const SIM_DT = 1 / 60;
+// direção de cada braço do cruzamento no chão (x, z): 0 = -Z (à frente), 1 = -X, 2 = +Z, 3 = +X
+const ARM_DIRS = [[0, -1], [-1, 0], [0, 1], [1, 0]];
+const ST_RETURN = 10;
 
 class TaskBoard {
   constructor() { this.clear(); }
@@ -102,7 +105,14 @@ export class Director {
     this.auto = [];
     this.lines.reset();
     this.board.clear();
-    this.swarm.reset(cfg.seed, cfg.spawn, cfg.cloud);
+    this.swarm.reset(cfg.seed, cfg.spawn, cfg.cloud, cfg.leader);
+    // abertura: as quatro linhas do chão que o participante desenha com o pinch
+    const [r0, r1] = cfg.leader.axisLen;
+    this.axisSlots = ARM_DIRS.map(([dx, dz]) => this.lines.allocate([dx * r0, 0, dz * r0], [dx * r1, 0, dz * r1], 0.9, R()));
+    this.axisDone = [false, false, false, false];
+    this.pinchCount = 0;
+    this.lastPick = null;
+    this.handPos = [0.12, 1.3, -0.55];
     this.env.clearHeat();
     this.litCount = 0;
 
@@ -212,6 +222,9 @@ export class Director {
       this._exited = k;
     } else this._exited = 0;
 
+    this.stepLeader(t);
+    this.once('echo', t >= cfg.echo.at, () => this.startEcho());
+
     this.stepAuto(SIM_DT);
     sw.step(SIM_DT, t, this.board, this.lines);
     this.t += SIM_DT;
@@ -220,6 +233,86 @@ export class Director {
       if (cfg.loop) { this.reset(); this._restartFade = true; if (this.audio && !this.silent) this.audio.restart(); }
       else { this.t = cfg.duration; this.playing = false; }
     }
+  }
+
+  // ------------------------------------------------------------------ abertura
+  // posição da "mão" quando ninguém está a controlar (vídeo, Desktop parado, scrub):
+  // um gesto lento e determinístico à frente do participante
+  autoHand(t, out) {
+    out[0] = 0.1 + 0.16 * Math.sin(t * 0.55) + 0.04 * Math.sin(t * 1.7);
+    out[1] = 1.28 + 0.08 * Math.sin(t * 0.8 + 1);
+    out[2] = -0.55 + 0.05 * Math.sin(t * 0.4);
+    return out;
+  }
+
+  userInControl() {
+    return !!(this.input && !this.silent && this.input.idleFor() < this.cfg.leader.autoAfter);
+  }
+
+  stepLeader(t) {
+    const Lc = this.cfg.leader, sw = this.swarm, L = sw.leader;
+    if (!L.on) return;
+    const user = this.userInControl();
+    const h = this.handPos;
+    if (user) { h[0] = this.input.pos.x; h[1] = this.input.pos.y; h[2] = this.input.pos.z; }
+    else this.autoHand(t, h);
+    // perda de controlo: atraso e desobediência crescem; depois voa para a nuvem do swarm
+    L.control = 1 - smooth(Lc.lossStart, Lc.lossEnd, t);
+    const away = smooth(Lc.lossEnd - 1, Lc.joinAt, t);
+    const cc = this.cfg.cloud.center;
+    for (let k = 0; k < 3; k++) L.target[k] = h[k] + (cc[k] - h[k]) * away;
+    L.scale = Lc.scale + (1 - Lc.scale) * smooth(Lc.lossEnd - 2, Lc.joinAt, t);
+    L.pinch = user ? this.input.pinching : (this._autoPinchUntil || 0) > t;
+    // piloto automático: pinches marcados na timeline, só se ninguém estiver a controlar
+    Lc.autoPinches.forEach((ap, k) => this.once('ap' + k, t >= ap, () => {
+      if (!user) { this._autoPinchUntil = t + 0.22; this.pinch(h, false); }
+    }));
+    this.once('cloudmode', t >= Lc.lossEnd, () => { sw.mode = 'cloud'; });
+    this.once('join', t >= Lc.joinAt, () => { sw.releaseLeader(); L.on = false; });
+  }
+
+  // pinch (ou clique) do participante: uma nota; os primeiros desenham as linhas do cruzamento
+  pinch(pos, fromUser = true) {
+    const Lc = this.cfg.leader, t = this.t;
+    const p = Array.isArray(pos) ? pos : [pos.x, pos.y, pos.z];
+    if (t < Lc.appearAt || t >= Lc.lossEnd) return;
+    if (fromUser && t >= Lc.lossStart && Math.random() < smooth(Lc.lossStart, Lc.lossEnd, t)) return; // já não obedece
+    const pick = this.pinchCount % 4;
+    this.pinchCount++;
+    this.lastPick = pick;
+    this.swarm.pulse[0] = 1;
+    if (this.audio && !this.silent && this.audio.note) this.audio.note(p[0], p[1], p[2], pick, 1);
+    // braço para onde a mão aponta (ainda por desenhar)
+    let best = -1, bestDot = -Infinity;
+    const len = Math.hypot(p[0], p[2]);
+    const fx = len > 0.05 ? p[0] / len : 0, fz = len > 0.05 ? p[2] / len : -1;
+    ARM_DIRS.forEach(([dx, dz], k) => {
+      if (this.axisDone[k]) return;
+      const d = dx * fx + dz * fz;
+      if (d > bestDot) { bestDot = d; best = k; }
+    });
+    if (best >= 0) {
+      this.axisDone[best] = true;
+      const slot = this.axisSlots[best];
+      this.lines.doFlash(slot, 1.6);
+      this.auto.push({ type: TASK.DRAW, slot, k: 0, dur: 1.8, h0: 0 });
+    }
+  }
+
+  // eco no clímax: um cursor volta à mão do participante por um instante
+  startEcho() {
+    const sw = this.swarm, cfg = this.cfg;
+    let j = -1;
+    for (let k = this.exitOrder.length - 1; k >= 0; k--) {
+      const i = this.exitOrder[k];
+      if (sw.alive[i] && sw.state[i] !== 8 && i !== 0) { j = i; break; }
+    }
+    if (j < 0) return;
+    const h = this.userInControl() ? [this.input.pos.x, this.input.pos.y, this.input.pos.z] : this.autoHand(this.t, [0, 0, 0]);
+    sw.returnTarget = [h[0], h[1] + 0.03, h[2] - 0.12];
+    sw.returnHold = cfg.echo.hold;
+    if (sw.task[j] >= 0) { this.board.unclaim(sw.task[j]); sw.task[j] = -1; }
+    sw.state[j] = ST_RETURN; sw.timer[j] = 0;
   }
 
   forceFinish(phaseId) {
@@ -260,7 +353,12 @@ export class Director {
 
   _onSwarmEvent(type, i, slot, x, y, z) {
     if (this.silent || !this.audio) return;
-    this.audio.onSwarmEvent(type, x, y, z);
+    const A = this.audio;
+    // os cursores que chegam repetem a última nota do participante
+    if (type === 'spawn' && this.lastPick != null && this.t < this.cfg.leader.joinAt && A.note) { A.note(x, y, z, this.lastPick, 0.45); return; }
+    if (type === 'returned' && A.note) { A.note(x, y, z, this.lastPick ?? 0, 0.9); return; }
+    if (type === 'leader') return;
+    A.onSwarmEvent(type, x, y, z);
   }
 
   get phase() {
@@ -331,7 +429,7 @@ export class Director {
     const fadeIn = 1 - smooth(0, 2.5, t);
     const fadeOut = smooth(cx.fadeStart, cx.fadeEnd, t);
     this.env.setFade(Math.max(fadeIn * 0.85, fadeOut));
-    if (this.audio && !this.silent) this.audio.update(t, { built: this._bf, pulse, fade: fadeOut }, this.playing);
+    if (this.audio && !this.silent) this.audio.update(legacyTime(t), { built: this._bf, pulse, fade: fadeOut }, this.playing);
   }
 }
 
