@@ -1,4 +1,4 @@
-// debug.js: painel lil-gui (só Desktop) + teclas de atalho.
+// debug.js: painel lil-gui (só Desktop, aberto com ?debug na URL).
 
 import GUI from 'lil-gui';
 import { TIMELINE } from './timeline.js';
@@ -47,11 +47,8 @@ export function setupDebug({ director, swarm, bloom, audio, app }) {
 
   window.addEventListener('keydown', (e) => {
     if (e.target && e.target.tagName === 'INPUT') return;
-    if (e.code === 'Space') { st.playing = !st.playing; st.playing ? director.play() : director.pause(); e.preventDefault(); }
-    if (e.code === 'KeyC') { app.cinematic = !app.cinematic; st.cinematic = app.cinematic; }
+    // Espaço, C e setas estão no main.js (funcionam sem o painel).
     if (e.code === 'KeyH') gui.show(gui._hidden = !gui._hidden);
-    if (e.code === 'ArrowRight') director.seek(director.t + 5);
-    if (e.code === 'ArrowLeft') director.seek(director.t - 5);
   });
 
   return {
@@ -59,6 +56,7 @@ export function setupDebug({ director, swarm, bloom, audio, app }) {
     update() {
       if (!st._scrubbing) st.time = director.t;
       st.playing = director.playing;
+      st.cinematic = app.cinematic;
       st.phase = director.phase.label;
       st.plan = director.t < director.P('morph').end ? director.blueprint1 : director.blueprint2;
     },

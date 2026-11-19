@@ -60,12 +60,12 @@ No clímax um cursor regressa por um instante à mão do participante (eco).
 
 - Arrastar: olhar à volta (na abertura, com o botão direito). Duplo clique: pointer lock.
 - Espaço: play/pausa. Setas ←/→: recuar/avançar 5 s.
-- C: câmara cinemática (para gravar vídeo). H: esconder o painel.
-- Painel de debug (lil-gui): play/pause, scrub da timeline, velocidade 0,25x–4x, N de cursores,
+- C: câmara cinemática (para gravar vídeo).
+- Painel de debug (lil-gui), só com `?debug` na URL (H esconde-o): play/pause, scrub da timeline, velocidade 0,25x–4x, N de cursores,
   bloom, volume, planta atual, loop, botão "reconstruir".
 
 Parâmetros de URL úteis: `?autostart` (começa sem clicar, sem som até haver um clique),
-`?n=500` (forçar N), `?t=60` (começar aos 60 s), `?cinematic`, `?bloom=0.6`, `?noloop`, `?nogui`.
+`?n=500` (forçar N), `?t=60` (começar aos 60 s), `?cinematic`, `?bloom=0.6`, `?noloop`, `?debug` (abre o painel de debug).
 
 ## Estrutura
 
@@ -85,7 +85,7 @@ audio/score.js        partitura (acordes por fase, arpejos), partilhada com o wo
 audio/synth-worklet.js síntese em tempo real (AudioWorklet): pad, sub, arpejo, delay, reverb FDN, néon, murmúrio
 xr/session.js         VRButton, foveation, local-floor, hand tracking, deteção do Quest
 xr/input.js           a "mão" do participante: indicador + pinch, comando ou rato
-debug.js              painel lil-gui (só Desktop)
+debug.js              painel lil-gui (só Desktop, com ?debug)
 ```
 
 ## Como funciona (resumo)

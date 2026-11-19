@@ -84,7 +84,7 @@ function startSequence(fromXR = false) {
 }
 document.getElementById('start').addEventListener('click', () => startSequence(false));
 
-setupXR(renderer, {
+const xrButton = setupXR(renderer, {
   onStart: () => {
     // em VR não há bloom: o halo das linhas fica um pouco mais largo para compensar
     lines.uniforms.uGlowBoost.value = 1.35;
@@ -97,6 +97,11 @@ setupXR(renderer, {
     camera.position.copy(EYE); camera.quaternion.identity();
   },
 });
+
+// O botão "Enter VR" do ecrã inicial só aparece quando o browser tem WebXR immersive-vr, e carrega no do three.js.
+const vrStart = document.getElementById('vr');
+navigator.xr?.isSessionSupported('immersive-vr').then((ok) => { vrStart.hidden = !ok; }).catch(() => {});
+vrStart.addEventListener('click', () => xrButton.click());
 
 // ------------------------------------------------------------------ olhar à volta (Desktop)
 const look = { yaw: 0, pitch: 0.08, dragging: false, lx: 0, ly: 0 };
@@ -142,9 +147,19 @@ function onResize() {
 window.addEventListener('resize', onResize);
 onResize();
 
-// ------------------------------------------------------------------ debug (só Desktop)
+// ------------------------------------------------------------------ teclas (Desktop)
+window.addEventListener('keydown', (e) => {
+  if (e.target && e.target.tagName === 'INPUT') return;
+  if (!app.started) return;
+  if (e.code === 'Space') { director.playing ? director.pause() : director.play(); e.preventDefault(); }
+  if (e.code === 'KeyC') app.cinematic = !app.cinematic;
+  if (e.code === 'ArrowRight') director.seek(director.t + 5);
+  if (e.code === 'ArrowLeft') director.seek(director.t - 5);
+});
+
+// ------------------------------------------------------------------ debug (só Desktop, com ?debug)
 let debug = null;
-if (!QUEST && !params.has('nogui')) {
+if (!QUEST && params.has('debug')) {
   import('./debug.js').then(({ setupDebug }) => { debug = setupDebug({ director, swarm, bloom, audio, app }); });
 }
 
