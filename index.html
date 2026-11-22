@@ -38,11 +38,11 @@
     .top .brand { font-weight: 700; letter-spacing: -0.01em; }
     .top .mid { color: var(--muted); }
     /* X para voltar ao início do portfolio */
-    .fechar { justify-self: end; position: relative; width: 36px; height: 36px; border-radius: 50%; border: 1px solid currentColor; color: var(--muted); transition: color .2s ease, transform .2s ease; }
-    .fechar::before, .fechar::after { content: ''; position: absolute; left: 50%; top: 50%; width: 15px; height: 1.5px; background: currentColor; }
+    .fechar { justify-self: end; position: relative; width: 44px; height: 44px; border-radius: 50%; border: 1.5px solid currentColor; color: var(--ink); transition: color .2s ease, transform .2s ease; }
+    .fechar::before, .fechar::after { content: ''; position: absolute; left: 50%; top: 50%; width: 18px; height: 2px; background: currentColor; }
     .fechar::before { transform: translate(-50%, -50%) rotate(45deg); }
     .fechar::after { transform: translate(-50%, -50%) rotate(-45deg); }
-    .fechar:hover, .fechar:focus-visible { color: var(--ink, #fff); transform: rotate(90deg); }
+    .fechar:hover, .fechar:focus-visible { transform: rotate(90deg); }
     /* Filete vermelho de néon sob a barra de cima. */
     .bar { height: 1px; background: var(--red); box-shadow: 0 0 6px var(--red), 0 0 14px rgba(255, 26, 42, 0.6); }
 
@@ -137,7 +137,7 @@
         <div class="top">
           <span class="brand">Swarm</span>
           <span class="mid">A WebXR piece for one cursor and many</span>
-          <a class="fechar" href="https://portfolio-nu-amber-86.vercel.app/" aria-label="Back to start" title="Back to start"></a>
+          <a class="fechar" href="https://joaoazevedo.vercel.app/" aria-label="Back to start" title="Back to start"></a>
         </div>
         <div class="bar" aria-hidden="true"></div>
       </header>
