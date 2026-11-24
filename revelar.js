@@ -7,7 +7,7 @@
 //   <canvas class="revelar" aria-hidden="true"
 //           data-video="./media/fundo-oculto.mp4" data-imagem="./media/fundo-oculto.jpg"
 //           data-raio="220" data-feather="0.85" data-intensidade="0.75" data-duracao="1.1"
-//           data-pixel="48"></canvas>
+//           data-pixel="48" data-inverter="0"></canvas>
 //   <script type="module" src="./revelar.js"></script>
 // Todos os data-* são opcionais (valores por omissão em PADRAO). Com ?afinar na URL abre um painel
 // para afinar os valores à mão; copia-os depois para os data-* do canvas.
@@ -68,10 +68,12 @@ function revelar(canvas) {
 
   const mascara = document.createElement('canvas');
   const mctx = mascara.getContext('2d', { willReadFrequently: true }); // fica na CPU: sobe para o WebGL sem ler da GPU
-  // Some com o ecrã inicial: o main.js de cada página esconde o #overlay ao começar
-  // (classe .hidden ou .leaving, ou o atributo hidden).
-  const ecra = canvas.closest('#overlay') || canvas.parentElement;
-  const escondido = () => ecra.hidden || ecra.classList.contains('hidden') || ecra.classList.contains('leaving');
+  // Some com o ecrã inicial (#overlay ou #intro): cada página esconde-o à sua maneira ao começar
+  // (classe .hidden ou .leaving, atributo hidden, ou um seletor próprio em data-escondido,
+  // por exemplo data-escondido="body.started").
+  const ecra = canvas.closest('#overlay, #intro') || canvas.parentElement;
+  const escondido = () => ecra.hidden || ecra.classList.contains('hidden') || ecra.classList.contains('leaving')
+    || (!!d.escondido && !!document.querySelector(d.escondido));
 
   // ---- fonte: vídeo em loop (com a imagem enquanto o vídeo não chega) ou só a imagem
   let fonte = null;
