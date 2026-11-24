@@ -32,7 +32,9 @@
     #overlay { position: fixed; inset: 0; z-index: 10; overflow-y: auto; overflow-x: hidden; background: var(--paper);
       clip-path: inset(0 0 0 0); transition: clip-path 1.1s var(--ease); }
     #overlay.hidden { clip-path: inset(0 0 100% 0); pointer-events: none; }
-    .page { min-height: 100%; display: grid; grid-template-rows: auto 1fr auto auto; padding: 0 var(--gutter); }
+    /* Fundo oculto: só aparece por instantes onde o rato passa (revelar.js). */
+    .revelar { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; opacity: 0; }
+    .page { position: relative; z-index: 1; min-height: 100%; display: grid; grid-template-rows: auto 1fr auto auto; padding: 0 var(--gutter); }
 
     .top { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 16px; padding: 22px 0 18px; font-size: 13px; }
     .top .brand { font-weight: 700; letter-spacing: -0.01em; }
@@ -131,6 +133,8 @@
 </head>
 <body>
   <div id="overlay">
+    <canvas class="revelar" aria-hidden="true" data-video="./media/fundo-oculto.mp4" data-imagem="./media/fundo-oculto.jpg"
+            data-raio="220" data-feather="0.85" data-intensidade="0.75" data-duracao="1.1"></canvas>
     <main class="page">
       <header>
         <div class="top">
@@ -191,6 +195,7 @@
       </div>
     </main>
   </div>
+  <script type="module" src="./revelar.js"></script>
   <script type="module" src="./main.js"></script>
 </body>
 </html>
