@@ -1,10 +1,13 @@
 // revelar.js: fundo oculto que só aparece por instantes onde o rato passa, por trás de uma máscara
-// circular com feather alto. Pensado para ser copiado tal e qual para as outras páginas de projeto.
+// circular com feather alto. Na borda da máscara a imagem chega pixelizada e vai-se resolvendo até
+// ficar nítida no centro; ao desvanecer, volta a desfazer-se em pixéis.
+// Pensado para ser copiado tal e qual para as outras páginas de projeto.
 //
 // Uso: um <canvas class="revelar"> dentro do ecrã inicial, com o vídeo e/ou a imagem nos atributos:
 //   <canvas class="revelar" aria-hidden="true"
 //           data-video="./media/fundo-oculto.mp4" data-imagem="./media/fundo-oculto.jpg"
-//           data-raio="220" data-feather="0.85" data-intensidade="0.75" data-duracao="1.1"></canvas>
+//           data-raio="220" data-feather="0.85" data-intensidade="0.75" data-duracao="1.1"
+//           data-pixel="48"></canvas>
 //   <script type="module" src="./revelar.js"></script>
 // Todos os data-* são opcionais (valores por omissão em PADRAO). Com ?afinar na URL abre um painel
 // para afinar os valores à mão; copia-os depois para os data-* do canvas.
@@ -16,8 +19,43 @@ const PADRAO = {
   duracao: 1.1,     // segundos até um rasto desaparecer depois de o rato passar
   espera: 0.12,     // segundos em que o rasto fica inteiro antes de começar a desvanecer
   forca: 0.35,      // opacidade de cada carimbo: os carimbos sobrepõem-se e somam
+  pixel: 48,        // tamanho do pixel maior, na borda (px CSS); 0 = sem pixelização
+  nitidez: 0.85,    // a partir de que valor da máscara (0–1) a imagem fica nítida
 };
 const ESCALA_MASCARA = 0.5; // a máscara é toda degradê: meia resolução chega
+
+const VERT = `
+attribute vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+// Cada fragmento lê a máscara no centro de um bloco grande; quanto mais forte a máscara ali, mais
+// fino o bloco (metade de cada vez), até 1 px. A cor e o alfa são lidos no centro do bloco, por isso
+// a própria borda da máscara fica em degraus.
+const FRAG = `
+precision highp float;
+uniform sampler2D uFonte, uMascara;
+uniform vec2 uEcra, uFonteTam;
+uniform float uPixel, uNitido, uIntens;
+float mascara(vec2 p) { return texture2D(uMascara, p / uEcra).a; }
+vec3 fonte(vec2 p) {
+  float s = max(uEcra.x / uFonteTam.x, uEcra.y / uFonteTam.y);
+  vec2 tam = uFonteTam * s;
+  vec2 uv = (p - (uEcra - tam) * 0.5) / tam;
+  return texture2D(uFonte, uv).rgb;
+}
+void main() {
+  vec2 frag = gl_FragCoord.xy;
+  vec2 p = frag;
+  if (uPixel > 1.0) {
+    float m0 = mascara((floor(frag / uPixel) + 0.5) * uPixel);
+    float n = ceil(log2(uPixel));                       // níveis até chegar a 1 px
+    float k = floor(clamp(m0 / max(uNitido, 0.01), 0.0, 1.0) * n + 0.0001);
+    float bloco = uPixel / exp2(k);
+    if (bloco > 1.0) p = (floor(frag / bloco) + 0.5) * bloco;
+  }
+  float a = clamp(mascara(p), 0.0, 1.0) * uIntens;
+  gl_FragColor = vec4(fonte(p) * a, a);
+}`;
 
 for (const canvas of document.querySelectorAll('canvas.revelar')) revelar(canvas);
 
@@ -26,13 +64,12 @@ function revelar(canvas) {
   const cfg = {};
   for (const k in PADRAO) cfg[k] = d[k] != null && d[k] !== '' ? +d[k] : PADRAO[k];
 
-  const ctx = canvas.getContext('2d');
   const mascara = document.createElement('canvas');
-  const mctx = mascara.getContext('2d');
+  const mctx = mascara.getContext('2d', { willReadFrequently: true }); // fica na CPU: sobe para o WebGL sem ler da GPU
   // Some com o ecrã inicial (o main.js põe .hidden no #overlay ao começar).
   const ecra = canvas.closest('#overlay') || canvas.parentElement;
 
-  // ---- fonte: vídeo em loop (com a imagem como poster) ou só a imagem
+  // ---- fonte: vídeo em loop (com a imagem enquanto o vídeo não chega) ou só a imagem
   let fonte = null;
   let video = null;
   if (d.imagem) {
@@ -51,6 +88,8 @@ function revelar(canvas) {
   const pronto = (f) => (f instanceof HTMLVideoElement ? f.readyState >= 2 : f.complete && f.naturalWidth > 0);
   const tamanho = (f) => (f instanceof HTMLVideoElement ? [f.videoWidth, f.videoHeight] : [f.naturalWidth, f.naturalHeight]);
 
+  const pintor = criarGL(canvas) || criar2D(canvas);
+
   // ---- tamanho do canvas = ecrã
   let L = 0, A = 0, dpr = 1;
   function redimensionar() {
@@ -62,6 +101,7 @@ function revelar(canvas) {
   }
   redimensionar();
   window.addEventListener('resize', redimensionar);
+  canvas.style.opacity = 1;
 
   // ---- carimbos: cada ponto por onde o rato passa, com a hora em que nasceu
   const carimbos = [];
@@ -112,38 +152,99 @@ function revelar(canvas) {
     const agora = performance.now() / 1000;
     while (carimbos.length && agora - carimbos[0].t > cfg.duracao) carimbos.shift();
 
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (!carimbos.length || ecra.classList.contains('hidden')) {
       carimbos.length = 0;
       aCorrer = false;
+      pintor.limpar();
       // o vídeo descansa quando não há nada à vista
       if (video && !video.paused) video.pause();
       return;
     }
 
-    // 1. máscara
-    mctx.globalCompositeOperation = 'source-over';
     mctx.clearRect(0, 0, mascara.width, mascara.height);
     for (const c of carimbos) carimbo(c.x * ESCALA_MASCARA, c.y * ESCALA_MASCARA, cfg.forca * vida(agora - c.t));
 
-    // 2. fundo (cobre o ecrã, como object-fit: cover) e 3. só fica onde a máscara deixa
     const f = fonte && pronto(fonte) ? fonte : null;
-    if (f) {
-      const [fw, fh] = tamanho(f);
-      const s = Math.max(canvas.width / fw, canvas.height / fh);
-      const w = fw * s, h = fh * s;
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.drawImage(f, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
-      ctx.globalCompositeOperation = 'destination-in';
-      ctx.drawImage(mascara, 0, 0, canvas.width, canvas.height);
-      ctx.globalCompositeOperation = 'source-over';
-    }
-    canvas.style.opacity = cfg.intensidade;
+    if (f) pintor.pintar(f, tamanho(f), mascara, cfg, dpr);
+    else pintor.limpar();
     requestAnimationFrame(desenhar);
   }
 
   if (new URLSearchParams(location.search).has('afinar')) painel(cfg, canvas);
+}
+
+// ---- WebGL: máscara + pixelização num só passo
+function criarGL(canvas) {
+  const gl = canvas.getContext('webgl', { premultipliedAlpha: true, alpha: true, antialias: false });
+  if (!gl) return null;
+  const sh = (tipo, src) => { const s = gl.createShader(tipo); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FRAG));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.warn('revelar.js:', gl.getProgramInfoLog(prog)); return null; }
+  gl.useProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const u = (n) => gl.getUniformLocation(prog, n);
+  const U = { fonte: u('uFonte'), mascara: u('uMascara'), ecra: u('uEcra'), fonteTam: u('uFonteTam'), pixel: u('uPixel'), nitido: u('uNitido'), intens: u('uIntens') };
+  const textura = (unidade) => {
+    const t = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + unidade);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  };
+  const tFonte = textura(0), tMascara = textura(1);
+  gl.uniform1i(U.fonte, 0);
+  gl.uniform1i(U.mascara, 1);
+  // as imagens vêm de cima para baixo; o gl_FragCoord conta de baixo para cima
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+  return {
+    limpar() { gl.viewport(0, 0, canvas.width, canvas.height); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); },
+    pintar(f, [fw, fh], mascara, cfg, dpr) {
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tFonte);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, f);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tMascara);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, mascara);
+      gl.uniform2f(U.ecra, canvas.width, canvas.height);
+      gl.uniform2f(U.fonteTam, fw, fh);
+      gl.uniform1f(U.pixel, Math.max(0, cfg.pixel) * dpr);
+      gl.uniform1f(U.nitido, cfg.nitidez);
+      gl.uniform1f(U.intens, cfg.intensidade);
+      gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    },
+  };
+}
+
+// ---- sem WebGL: só a máscara suave, sem pixelização
+function criar2D(canvas) {
+  const ctx = canvas.getContext('2d');
+  return {
+    limpar() { ctx.clearRect(0, 0, canvas.width, canvas.height); },
+    pintar(f, [fw, fh], mascara, cfg) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const s = Math.max(canvas.width / fw, canvas.height / fh), w = fw * s, h = fh * s;
+      ctx.globalAlpha = cfg.intensidade;
+      ctx.drawImage(f, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'destination-in';
+      ctx.drawImage(mascara, 0, 0, canvas.width, canvas.height);
+      ctx.globalCompositeOperation = 'source-over';
+    },
+  };
 }
 
 // ---- painel de afinação (?afinar): mostra os valores para colar nos data-* do canvas
@@ -157,6 +258,8 @@ async function painel(cfg, canvas) {
   gui.add(cfg, 'duracao', 0.2, 5, 0.05).name('duração (s)');
   gui.add(cfg, 'espera', 0, 2, 0.01).name('espera (s)');
   gui.add(cfg, 'forca', 0.05, 1, 0.01).name('força do rasto');
+  gui.add(cfg, 'pixel', 0, 128, 1).name('pixel maior (px)');
+  gui.add(cfg, 'nitidez', 0.05, 1, 0.01).name('nítido a partir de');
   const st = {
     copiar() {
       const txt = Object.keys(PADRAO).map((k) => `data-${k}="${cfg[k]}"`).join(' ');
