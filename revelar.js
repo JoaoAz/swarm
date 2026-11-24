@@ -21,6 +21,7 @@ const PADRAO = {
   forca: 0.35,      // opacidade de cada carimbo: os carimbos sobrepõem-se e somam
   pixel: 48,        // tamanho do pixel maior, na borda (px CSS); 0 = sem pixelização
   nitidez: 0.85,    // a partir de que valor da máscara (0–1) a imagem fica nítida
+  inverter: 0,      // 1 = negativo da imagem (em páginas de fundo claro, o preto passa a papel)
 };
 const ESCALA_MASCARA = 0.5; // a máscara é toda degradê: meia resolução chega
 
@@ -35,13 +36,14 @@ const FRAG = `
 precision highp float;
 uniform sampler2D uFonte, uMascara;
 uniform vec2 uEcra, uFonteTam;
-uniform float uPixel, uNitido, uIntens;
+uniform float uPixel, uNitido, uIntens, uInverter;
 float mascara(vec2 p) { return texture2D(uMascara, p / uEcra).a; }
 vec3 fonte(vec2 p) {
   float s = max(uEcra.x / uFonteTam.x, uEcra.y / uFonteTam.y);
   vec2 tam = uFonteTam * s;
   vec2 uv = (p - (uEcra - tam) * 0.5) / tam;
-  return texture2D(uFonte, uv).rgb;
+  vec3 c = texture2D(uFonte, uv).rgb;
+  return mix(c, 1.0 - c, uInverter);
 }
 void main() {
   vec2 frag = gl_FragCoord.xy;
@@ -66,8 +68,10 @@ function revelar(canvas) {
 
   const mascara = document.createElement('canvas');
   const mctx = mascara.getContext('2d', { willReadFrequently: true }); // fica na CPU: sobe para o WebGL sem ler da GPU
-  // Some com o ecrã inicial (o main.js põe .hidden no #overlay ao começar).
+  // Some com o ecrã inicial: o main.js de cada página esconde o #overlay ao começar
+  // (classe .hidden ou .leaving, ou o atributo hidden).
   const ecra = canvas.closest('#overlay') || canvas.parentElement;
+  const escondido = () => ecra.hidden || ecra.classList.contains('hidden') || ecra.classList.contains('leaving');
 
   // ---- fonte: vídeo em loop (com a imagem enquanto o vídeo não chega) ou só a imagem
   let fonte = null;
@@ -116,7 +120,7 @@ function revelar(canvas) {
   }
 
   function aoMover(e) {
-    if (ecra.classList.contains('hidden')) { ultimo = null; return; }
+    if (escondido()) { ultimo = null; return; }
     const x = e.clientX, y = e.clientY, agora = performance.now() / 1000;
     if (ultimo) {
       // preencher o caminho entre dois eventos, para o rasto não sair às bolinhas
@@ -152,7 +156,7 @@ function revelar(canvas) {
     const agora = performance.now() / 1000;
     while (carimbos.length && agora - carimbos[0].t > cfg.duracao) carimbos.shift();
 
-    if (!carimbos.length || ecra.classList.contains('hidden')) {
+    if (!carimbos.length || escondido()) {
       carimbos.length = 0;
       aCorrer = false;
       pintor.limpar();
@@ -193,7 +197,7 @@ function criarGL(canvas) {
   gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
   const u = (n) => gl.getUniformLocation(prog, n);
-  const U = { fonte: u('uFonte'), mascara: u('uMascara'), ecra: u('uEcra'), fonteTam: u('uFonteTam'), pixel: u('uPixel'), nitido: u('uNitido'), intens: u('uIntens') };
+  const U = { fonte: u('uFonte'), mascara: u('uMascara'), ecra: u('uEcra'), fonteTam: u('uFonteTam'), pixel: u('uPixel'), nitido: u('uNitido'), intens: u('uIntens'), inverter: u('uInverter') };
   const textura = (unidade) => {
     const t = gl.createTexture();
     gl.activeTexture(gl.TEXTURE0 + unidade);
@@ -223,6 +227,7 @@ function criarGL(canvas) {
       gl.uniform1f(U.pixel, Math.max(0, cfg.pixel) * dpr);
       gl.uniform1f(U.nitido, cfg.nitidez);
       gl.uniform1f(U.intens, cfg.intensidade);
+      gl.uniform1f(U.inverter, cfg.inverter ? 1 : 0);
       gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     },
@@ -238,7 +243,9 @@ function criar2D(canvas) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const s = Math.max(canvas.width / fw, canvas.height / fh), w = fw * s, h = fh * s;
       ctx.globalAlpha = cfg.intensidade;
+      ctx.filter = cfg.inverter ? 'invert(1)' : 'none';
       ctx.drawImage(f, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+      ctx.filter = 'none';
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'destination-in';
       ctx.drawImage(mascara, 0, 0, canvas.width, canvas.height);
@@ -249,7 +256,7 @@ function criar2D(canvas) {
 
 // ---- painel de afinação (?afinar): mostra os valores para colar nos data-* do canvas
 async function painel(cfg, canvas) {
-  const { default: GUI } = await import('https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.esm.js');
+  const { default: GUI } = await import(/* @vite-ignore */ 'https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.esm.js');
   const gui = new GUI({ title: 'Fundo oculto' });
   gui.domElement.style.zIndex = 50;
   gui.add(cfg, 'raio', 40, 700, 1).name('raio (px)');
@@ -260,6 +267,7 @@ async function painel(cfg, canvas) {
   gui.add(cfg, 'forca', 0.05, 1, 0.01).name('força do rasto');
   gui.add(cfg, 'pixel', 0, 128, 1).name('pixel maior (px)');
   gui.add(cfg, 'nitidez', 0.05, 1, 0.01).name('nítido a partir de');
+  gui.add(cfg, 'inverter', { normal: 0, negativo: 1 }).name('imagem');
   const st = {
     copiar() {
       const txt = Object.keys(PADRAO).map((k) => `data-${k}="${cfg[k]}"`).join(' ');
